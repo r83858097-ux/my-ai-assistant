@@ -1,0 +1,6 @@
+{
+  "name": "Gemini API Guide & Explorer",
+  "description": "Step-by-step instructions for obtaining Google Gemini API keys, inspecting model connectivity, and testing server-side prompts with the official Google Gen AI SDK.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
