@@ -19,6 +19,7 @@ import {
   Mic,
   Volume2,
   VolumeX,
+  FileText,
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -37,6 +38,180 @@ const STARTER_PROMPTS = [
   'What are 5 helpful tips to prepare for a job interview?',
 ];
 
+
+function MessageWriter({
+  onClose,
+  onUseMessage,
+}: {
+  onClose: () => void;
+  onUseMessage: (message: string) => void;
+}) {
+  const [category, setCategory] = useState('Birthday');
+  const [language, setLanguage] = useState('Hindi');
+  const [tone, setTone] = useState('Friendly');
+  const [length, setLength] = useState('Short');
+  const [details, setDetails] = useState('');
+  const [result, setResult] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const generate = async () => {
+    if (loading) return;
+    setLoading(true);
+    setError('');
+    setCopied(false);
+
+    const prompt = `Write a complete, ready-to-use ${category} message.
+Language: ${language}.
+Tone: ${tone}.
+Length: ${length}.
+User's details: ${details.trim() || 'Create a suitable general message.'}
+
+Requirements:
+- Use natural, correct ${language}.
+- Do not invent names, dates or personal facts.
+- Use [Name] placeholders when needed.
+- Return only the message, without explanations.`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const url = Capacitor.isNativePlatform()
+        ? 'https://my-ai-assistant-8eol.onrender.com/api/chat'
+        : '/api/chat';
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages: [{ role: 'user', text: prompt }],
+        }),
+        signal: controller.signal,
+      });
+
+      const raw = await response.text();
+      let data: any;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        throw new Error(`Server returned an invalid response (${response.status}).`);
+      }
+
+      if (!response.ok) {
+        throw new Error(data.error || 'Message generation failed.');
+      }
+      if (typeof data.reply !== 'string' || !data.reply.trim()) {
+        throw new Error('AI returned an empty message. Please try again.');
+      }
+      setResult(data.reply.trim());
+    } catch (err: any) {
+      setError(
+        err.name === 'AbortError'
+          ? 'Request timed out. Please try again.'
+          : err.message || 'Could not generate the message.'
+      );
+    } finally {
+      clearTimeout(timeout);
+      setLoading(false);
+    }
+  };
+
+  const copyResult = async () => {
+    try {
+      await navigator.clipboard.writeText(result);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError('Copy failed. You can select the message and copy it manually.');
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
+      <section className="w-full max-w-lg max-h-[92dvh] overflow-y-auto bg-slate-900 border border-slate-700 rounded-t-3xl sm:rounded-2xl p-4 shadow-2xl">
+        <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center gap-2">
+            <FileText className="w-5 h-5 text-indigo-400" />
+            <div>
+              <h2 className="text-base font-bold text-white">AI Message Writer</h2>
+              <p className="text-[11px] text-slate-400">Create messages with Gemini</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-2 text-slate-400 hover:text-white" aria-label="Close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="space-y-3">
+          <label className="block text-xs text-slate-300">
+            Category
+            <select value={category} onChange={e => setCategory(e.target.value)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white">
+              {['Birthday', 'Love', 'Friendship', 'WhatsApp Reply', 'Professional', 'Application', 'Email'].map(x => <option key={x}>{x}</option>)}
+            </select>
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-xs text-slate-300">
+              Language
+              <select value={language} onChange={e => setLanguage(e.target.value)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white">
+                <option>Hindi</option>
+                <option>English</option>
+              </select>
+            </label>
+            <label className="block text-xs text-slate-300">
+              Tone
+              <select value={tone} onChange={e => setTone(e.target.value)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white">
+                <option>Formal</option>
+                <option>Friendly</option>
+                <option>Romantic</option>
+              </select>
+            </label>
+          </div>
+
+          <div>
+            <p className="text-xs text-slate-300 mb-1.5">Length</p>
+            <div className="grid grid-cols-2 gap-2">
+              {['Short', 'Long'].map(x => (
+                <button key={x} type="button" onClick={() => setLength(x)} className={`rounded-xl border py-2.5 text-xs ${length === x ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-slate-950 border-slate-700 text-slate-300'}`}>{x}</button>
+              ))}
+            </div>
+          </div>
+
+          <label className="block text-xs text-slate-300">
+            Details or instructions
+            <textarea value={details} onChange={e => setDetails(e.target.value)} rows={3} placeholder="Example: Birthday message for my best friend..." className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm text-white placeholder:text-slate-500" />
+          </label>
+
+          <button type="button" onClick={generate} disabled={loading} className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 py-3 text-sm font-bold text-white flex items-center justify-center gap-2">
+            {loading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            {loading ? 'Generating...' : result ? 'Regenerate Message' : 'Generate Message'}
+          </button>
+
+          {error && <p className="text-xs text-rose-400 bg-rose-950/30 rounded-lg p-3">{error}</p>}
+
+          {result && (
+            <div className="space-y-3 pt-2">
+              <div className="flex justify-between items-center">
+                <h3 className="text-sm font-semibold text-white">Generated message</h3>
+                <button type="button" onClick={copyResult} className="text-xs text-indigo-300 flex items-center gap-1">
+                  {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+              <div className="whitespace-pre-wrap break-words bg-slate-950 border border-slate-700 rounded-xl p-3 text-sm leading-relaxed text-slate-200">{result}</div>
+              <button type="button" onClick={() => onUseMessage(result)} className="w-full rounded-xl bg-emerald-600 hover:bg-emerald-500 py-3 text-sm font-bold text-white flex items-center justify-center gap-2">
+                <Send className="w-4 h-4" /> Use in Chat
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
@@ -54,6 +229,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showInfoModal, setShowInfoModal] = useState<boolean>(false);
+  const [showMessageWriter, setShowMessageWriter] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
@@ -499,6 +675,16 @@ export default function App() {
             <Plus className="w-3.5 h-3.5 text-indigo-400" />
             <span className="hidden xs:inline text-[11px] font-medium">New</span>
           </button>
+          <button
+            onClick={() => setShowMessageWriter(true)}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-xs text-indigo-200 transition-colors"
+            title="AI Message Writer"
+            aria-label="AI Message Writer"
+          >
+            <FileText className="w-3.5 h-3.5" />
+            <span className="text-[11px] font-medium">Write</span>
+          </button>
+
 
           <button
             onClick={() => setShowInfoModal(true)}
@@ -747,6 +933,16 @@ export default function App() {
           <span>{messages.length} messages in session</span>
         </div>
       </footer>
+
+      {showMessageWriter && (
+        <MessageWriter
+          onClose={() => setShowMessageWriter(false)}
+          onUseMessage={(message) => {
+            setShowMessageWriter(false);
+            setInput(message);
+          }}
+        />
+      )}
 
       {/* Information Modal */}
       {showInfoModal && (
