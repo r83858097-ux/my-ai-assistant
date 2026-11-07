@@ -32,6 +32,7 @@ function getGeminiClient() {
 // Supported models: gemini-3.1-flash-lite has high-throughput free-tier limits and fast responses
 const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
 const FALLBACK_MODEL = 'gemini-3.8-flash';
+const THIRD_FALLBACK_MODEL = 'gemini-3.5-flash-lite';
 
 // Timeout helper: guarantees a promise resolves or rejects within ms milliseconds
 function withTimeout<T>(promise: Promise<T>, ms: number, message = 'Operation timed out'): Promise<T> {
@@ -115,7 +116,7 @@ app.post('/api/test-connection', async (_req, res) => {
   const ai = getGeminiClient();
   const start = performance.now();
 
-  const modelsToTry = [PRIMARY_MODEL, FALLBACK_MODEL];
+  const modelsToTry = [PRIMARY_MODEL, FALLBACK_MODEL, THIRD_FALLBACK_MODEL];
   let lastError: any = null;
 
   for (const model of modelsToTry) {
@@ -187,6 +188,7 @@ app.post('/api/chat', async (req, res) => {
   const candidateModels = [
     { name: PRIMARY_MODEL, timeoutMs: 15000 },
     { name: FALLBACK_MODEL, timeoutMs: 15000 },
+    { name: THIRD_FALLBACK_MODEL, timeoutMs: 15000 },
   ];
 
   let lastError: any = null;
