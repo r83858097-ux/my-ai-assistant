@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { SpeechRecognition } from '@capgo/capacitor-speech-recognition';
 import {
   Send,
@@ -246,29 +247,63 @@ export default function App() {
 
 
   // Stop voice playback
-  const stopSpeaking = () => {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  const stopSpeaking = async () => {
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await TextToSpeech.stop();
+      } else if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    } catch (error) {
+      console.error('Stop voice error:', error);
+    }
     setSpeakingId(null);
   };
 
   // Read AI answer aloud
-  const speakMessage = (text: string, id: string) => {
-    if (!('speechSynthesis' in window)) {
+  const speakMessage = async (text: string, id: string) => {
+    try {
+      setSpeakingId(id);
+
+      if (Capacitor.isNativePlatform()) {
+        await TextToSpeech.stop();
+
+        const lang = /[\\u0900-\\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+
+        await TextToSpeech.speak({
+          text,
+          lang,
+          rate: 1,
+          pitch: 1,
+          volume: 1,
+          queueStrategy: 0
+        });
+
+        setSpeakingId(null);
+        return;
+      }
+
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = /[\\u0900-\\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+        utterance.rate = 1;
+        utterance.pitch = 1;
+        utterance.onend = () => setSpeakingId(null);
+        utterance.onerror = () => setSpeakingId(null);
+
+        window.speechSynthesis.speak(utterance);
+        return;
+      }
+
+      setSpeakingId(null);
       setStatusMessage('Voice playback is not supported on this device.');
-      return;
+    } catch (error) {
+      console.error('Voice playback error:', error);
+      setSpeakingId(null);
+      setStatusMessage('Voice playback failed. Please check Android Text-to-Speech settings.');
     }
-
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = /[\u0900-\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
-    utterance.rate = 1;
-    utterance.pitch = 1;
-    utterance.onstart = () => setSpeakingId(id);
-    utterance.onend = () => setSpeakingId(null);
-    utterance.onerror = () => setSpeakingId(null);
-
-    setSpeakingId(id);
-    window.speechSynthesis.speak(utterance);
   };
 
   // Microphone input for Android and Chrome
