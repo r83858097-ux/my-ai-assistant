@@ -151,7 +151,10 @@ export default function App() {
         text: m.text,
       }));
 
-      const response = await fetch('/api/chat', {
+      const apiUrl = Capacitor.isNativePlatform()
+        ? 'https://my-ai-assistant-8eol.onrender.com/api/chat'
+        : '/api/chat';
+      const response = await fetch(apiUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ messages: validMessages }),
