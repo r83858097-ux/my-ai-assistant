@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { Capacitor } from '@capacitor/core';
+import { SpeechRecognition } from '@capgo/capacitor-speech-recognition';
 import {
   Send,
   Plus,
@@ -13,6 +15,9 @@ import {
   X,
   ShieldCheck,
   StopCircle,
+  Mic,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -49,10 +54,22 @@ export default function App() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showInfoModal, setShowInfoModal] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [speakingId, setSpeakingId] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const browserRecognitionRef = useRef<any>(null);
+
+  // Cleanup voice services
+  useEffect(() => {
+    return () => {
+      try { browserRecognitionRef.current?.stop(); } catch {}
+      try { SpeechRecognition.stop().catch(() => {}); } catch {}
+      try { window.speechSynthesis?.cancel(); } catch {}
+    };
+  }, []);
 
   // Sync to sessionStorage
   useEffect(() => {
@@ -222,6 +239,143 @@ export default function App() {
     navigator.clipboard.writeText(text);
     setCopiedId(id);
     setTimeout(() => setCopiedId(null), 2000);
+  };
+
+
+  // Stop voice playback
+  const stopSpeaking = () => {
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    setSpeakingId(null);
+  };
+
+  // Read AI answer aloud
+  const speakMessage = (text: string, id: string) => {
+    if (!('speechSynthesis' in window)) {
+      setStatusMessage('Voice playback is not supported on this device.');
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.lang = /[\u0900-\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.onstart = () => setSpeakingId(id);
+    utterance.onend = () => setSpeakingId(null);
+    utterance.onerror = () => setSpeakingId(null);
+
+    setSpeakingId(id);
+    window.speechSynthesis.speak(utterance);
+  };
+
+  // Microphone input for Android and Chrome
+  const handleVoiceInput = async () => {
+    if (isListening) {
+      try {
+        if (Capacitor.isNativePlatform()) {
+          await SpeechRecognition.stop();
+        } else {
+          browserRecognitionRef.current?.stop();
+        }
+      } catch (error) {
+        console.warn('Microphone stop error:', error);
+      }
+      setIsListening(false);
+      setStatusMessage('Microphone stopped');
+      return;
+    }
+
+    if (isLoading) return;
+
+    try {
+      setStatusMessage('Checking microphone...');
+
+      if (Capacitor.isNativePlatform()) {
+        const availability = await SpeechRecognition.available();
+        if (!availability.available) {
+          throw new Error('Speech recognition is unavailable on this device.');
+        }
+
+        let permission = await SpeechRecognition.checkPermissions();
+        if (permission.speechRecognition !== 'granted') {
+          permission = await SpeechRecognition.requestPermissions();
+        }
+        if (permission.speechRecognition !== 'granted') {
+          throw new Error('Microphone permission was not granted.');
+        }
+
+        setIsListening(true);
+        setStatusMessage('Listening... Speak now');
+
+        const result = await SpeechRecognition.start({
+          language: 'hi-IN',
+          maxResults: 1,
+          popup: true,
+          partialResults: false,
+          addPunctuation: true
+        });
+
+        setIsListening(false);
+        const transcript = result.matches?.[0]?.trim();
+
+        if (transcript) {
+          setInput(transcript);
+          setStatusMessage('Voice recognised. Sending...');
+          handleSend(transcript);
+        } else {
+          setStatusMessage('No speech detected. Please try again.');
+        }
+        return;
+      }
+
+      const SpeechRecognitionAPI =
+        (window as any).SpeechRecognition ||
+        (window as any).webkitSpeechRecognition;
+
+      if (!SpeechRecognitionAPI) {
+        throw new Error('Speech recognition unavailable. Please try Chrome.');
+      }
+
+      const recognition = new SpeechRecognitionAPI();
+      browserRecognitionRef.current = recognition;
+      recognition.lang = 'hi-IN';
+      recognition.interimResults = false;
+      recognition.maxAlternatives = 1;
+
+      recognition.onstart = () => {
+        setIsListening(true);
+        setStatusMessage('Listening... Speak now');
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results?.[0]?.[0]?.transcript?.trim();
+        if (transcript) {
+          setInput(transcript);
+          setStatusMessage('Voice recognised. Sending...');
+          handleSend(transcript);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        setIsListening(false);
+        setStatusMessage(
+          event.error === 'not-allowed'
+            ? 'Microphone permission denied.'
+            : `Voice recognition error: ${event.error || 'Please try again.'}`
+        );
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        browserRecognitionRef.current = null;
+      };
+
+      recognition.start();
+    } catch (error: any) {
+      setIsListening(false);
+      console.error('Voice input error:', error);
+      setStatusMessage(error?.message || 'Could not start voice recognition.');
+    }
   };
 
   const retryLastMessage = () => {
@@ -424,17 +578,31 @@ export default function App() {
                         )}
                       </div>
                       {!isUser && !message.isError && (
-                        <button
-                          onClick={() => copyMessage(message.text, message.id)}
-                          className="opacity-70 hover:opacity-100 transition-opacity p-0.5 rounded text-slate-400 hover:text-white"
-                          title="Copy text"
-                        >
-                          {copiedId === message.id ? (
-                            <Check className="w-3 h-3 text-emerald-400" />
-                          ) : (
-                            <Copy className="w-3 h-3" />
-                          )}
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() =>
+                              speakingId === message.id
+                                ? stopSpeaking()
+                                : speakMessage(message.text, message.id)
+                            }
+                            className="opacity-80 hover:opacity-100 p-0.5 rounded text-slate-400 hover:text-indigo-300"
+                            title={speakingId === message.id ? "Stop voice" : "Read answer aloud"}
+                            aria-label={speakingId === message.id ? "Stop voice" : "Read answer aloud"}
+                          >
+                            {speakingId === message.id
+                              ? <VolumeX className="w-3.5 h-3.5 text-indigo-300" />
+                              : <Volume2 className="w-3.5 h-3.5" />}
+                          </button>
+                          <button
+                            onClick={() => copyMessage(message.text, message.id)}
+                            className="opacity-70 hover:opacity-100 transition-opacity p-0.5 rounded text-slate-400 hover:text-white"
+                            title="Copy text"
+                          >
+                            {copiedId === message.id
+                              ? <Check className="w-3 h-3 text-emerald-400" />
+                              : <Copy className="w-3 h-3" />}
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -487,6 +655,22 @@ export default function App() {
           }}
           className="flex items-end gap-2 bg-slate-950 border border-slate-800 focus-within:border-indigo-500/70 rounded-2xl p-1.5 transition-all"
         >
+          <button
+            type="button"
+            onClick={handleVoiceInput}
+            disabled={isLoading}
+            className={`flex-none w-9 h-9 rounded-xl flex items-center justify-center transition-all border ${
+              isListening
+                ? 'bg-rose-600 border-rose-500 text-white animate-pulse'
+                : 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+            } disabled:opacity-40`}
+            title={isListening ? "Stop microphone" : "Speak your question"}
+            aria-label={isListening ? "Stop microphone" : "Speak your question"}
+          >
+            {isListening
+              ? <StopCircle className="w-4 h-4" />
+              : <Mic className="w-4 h-4" />}
+          </button>
           <textarea
             ref={textareaRef}
             rows={1}
