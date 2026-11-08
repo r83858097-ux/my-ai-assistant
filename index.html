@@ -16,7 +16,33 @@
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200">
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    
+<script>
+(function () {
+  function showError(message) {
+    let box = document.getElementById('browser-error-box');
+    if (!box) {
+      box = document.createElement('pre');
+      box.id = 'browser-error-box';
+      box.style.cssText = 'position:fixed;inset:0;z-index:999999;background:#090d16;color:#ff7777;padding:20px;white-space:pre-wrap;overflow:auto;font:14px monospace';
+      document.body.appendChild(box);
+    }
+    box.textContent += message + '\\n\\n';
+  }
+
+  window.addEventListener('error', function (e) {
+    showError('BROWSER ERROR: ' + (e.message || 'Resource loading failed') +
+      '\\nFile: ' + (e.filename || 'unknown') +
+      '\\nLine: ' + (e.lineno || 'unknown'));
+  }, true);
+
+  window.addEventListener('unhandledrejection', function (e) {
+    showError('PROMISE ERROR: ' + (e.reason?.stack || e.reason || 'unknown'));
+  });
+})();
+</script>
+
+<script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
 
