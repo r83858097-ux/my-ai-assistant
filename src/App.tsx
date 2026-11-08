@@ -23,6 +23,7 @@ import {
   VolumeX,
   FileText,
   History,
+  Menu,
   LogOut,
 } from 'lucide-react';
 
@@ -244,6 +245,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const [chatSessions, setChatSessions] = useState<any[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [showMenu, setShowMenu] = useState(false);
   const [isHistoryLoading, setIsHistoryLoading] = useState(false);
   const activeSessionIdRef = useRef<string | null>(null);
 
@@ -806,55 +808,50 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
                 Gemini
               </span>
             </div>
-            <p className="text-[11px] text-slate-400">gemini-3.8-flash • resilient failover</p>
+            <p className="text-[11px] text-slate-400">gemini-3.8-flash</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="relative">
           <button
-            onClick={onSignOut}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-            title="Sign Out"
-            aria-label="Sign Out"
+            type="button"
+            onClick={() => setShowMenu((v) => !v)}
+            className="p-2.5 rounded-xl text-slate-200 hover:bg-slate-800 transition-colors"
+            title="Menu"
+            aria-label="Open menu"
+            aria-expanded={showMenu}
           >
-            <LogOut className="w-4 h-4" />
-          </button>
-          <button
-            onClick={startNewChat}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition-colors"
-            title="Start New Chat"
-            aria-label="Start New Chat"
-          >
-            <Plus className="w-3.5 h-3.5 text-indigo-400" />
-            <span className="hidden xs:inline text-[11px] font-medium">New</span>
-          </button>
-          <button
-            onClick={() => setShowHistory(true)}
-            className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
-            title="Chat History"
-            aria-label="Chat History"
-          >
-            <History className="w-4 h-4" />
-        </button>
-        <button
-            onClick={() => setShowMessageWriter(true)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-xs text-indigo-200 transition-colors"
-            title="AI Message Writer"
-            aria-label="AI Message Writer"
-          >
-            <FileText className="w-3.5 h-3.5" />
-            <span className="text-[11px] font-medium">Write</span>
+            {showMenu ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
           </button>
 
-
-          <button
-            onClick={() => setShowInfoModal(true)}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
-            title="App Details & Secrets Setup"
-            aria-label="App Details"
-          >
-            <Info className="w-4 h-4" />
-          </button>
+          {showMenu && (
+            <>
+              <button
+                type="button"
+                className="fixed inset-0 z-30 cursor-default"
+                aria-label="Close menu"
+                onClick={() => setShowMenu(false)}
+              />
+              <div className="absolute right-0 top-full mt-2 w-60 rounded-2xl border border-slate-700 bg-slate-900 p-2 shadow-2xl z-40">
+                <button type="button" onClick={() => { setShowMenu(false); startNewChat(); }} className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-200 hover:bg-slate-800">
+                  <Plus className="w-4 h-4 text-indigo-400" /> New Chat
+                </button>
+                <button type="button" onClick={() => { setShowMenu(false); setShowHistory(true); }} className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-200 hover:bg-slate-800">
+                  <History className="w-4 h-4 text-indigo-400" /> Chat History
+                </button>
+                <button type="button" onClick={() => { setShowMenu(false); setShowMessageWriter(true); }} className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-200 hover:bg-slate-800">
+                  <FileText className="w-4 h-4 text-indigo-400" /> Message Writer
+                </button>
+                <button type="button" onClick={() => { setShowMenu(false); setShowInfoModal(true); }} className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-slate-200 hover:bg-slate-800">
+                  <Info className="w-4 h-4 text-indigo-400" /> App Info
+                </button>
+                <div className="my-1 border-t border-slate-800" />
+                <button type="button" onClick={() => { setShowMenu(false); onSignOut(); }} className="w-full flex items-center gap-3 rounded-xl px-3 py-3 text-sm text-red-300 hover:bg-red-500/10">
+                  <LogOut className="w-4 h-4" /> Sign Out
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </header>
 
