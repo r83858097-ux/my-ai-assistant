@@ -22,6 +22,7 @@ import {
   Volume2,
   VolumeX,
   FileText,
+  History,
   LogOut,
 } from 'lucide-react';
 
@@ -230,18 +231,7 @@ Requirements:
 }
 
 function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
-  const [messages, setMessages] = useState<ChatMessage[]>(() => {
-    try {
-      const saved = sessionStorage.getItem('my_ai_assistant_chat');
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch {
-      // fallback
-    }
-    return [];
-  });
-
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState<string>('');
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -250,13 +240,93 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isListening, setIsListening] = useState(false);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+  const [chatSessions, setChatSessions] = useState<any[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const activeSessionIdRef = useRef<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const browserRecognitionRef = useRef<any>(null);
 
-  // Cleanup voice services
+  const refreshChatSessions = async (uid: string) => {
+    const { data, error } = await supabase
+      .from('chat_sessions')
+      .select('id, title, created_at, updated_at')
+      .eq('user_id', uid)
+      .order('updated_at', { ascending: false });
+
+    if (error) throw error;
+    setChatSessions(data || []);
+    return data || [];
+  };
+
+  const loadChatSession = async (sessionId: string, uid?: string) => {
+    const ownerId = uid || userId;
+    if (!ownerId) return;
+
+    setIsHistoryLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .select('id, role, content, model, created_at')
+        .eq('session_id', sessionId)
+        .eq('user_id', ownerId)
+        .order('created_at', { ascending: true });
+
+      if (error) throw error;
+
+      const loadedMessages: ChatMessage[] = (data || []).map((row: any) => ({
+        id: row.id,
+        role: row.role,
+        text: row.content,
+        model: row.model || undefined,
+        timestamp: new Date(row.created_at).toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      }));
+
+      activeSessionIdRef.current = sessionId;
+      setActiveSessionId(sessionId);
+      setMessages(loadedMessages);
+      setShowHistory(false);
+    } catch (error: any) {
+      console.error('History loading error:', error);
+      setStatusMessage(error.message || 'Could not load chat history.');
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    let active = true;
+
+    const initializeHistory = async () => {
+      try {
+        const { data: { user }, error } = await supabase.auth.getUser();
+        if (error) throw error;
+        if (!user || !active) return;
+
+        setUserId(user.id);
+        const sessions = await refreshChatSessions(user.id);
+        if (active && sessions.length > 0) {
+          await loadChatSession(sessions[0].id, user.id);
+        }
+      } catch (error: any) {
+        console.error('History initialization error:', error);
+        if (active) setStatusMessage(error.message || 'Could not load saved chats.');
+      }
+    };
+
+    void initializeHistory();
+    return () => { active = false; };
+  }, []);
+
+// Cleanup voice services
   useEffect(() => {
     return () => {
       try { browserRecognitionRef.current?.stop(); } catch {}
@@ -264,15 +334,6 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       try { window.speechSynthesis?.cancel(); } catch {}
     };
   }, []);
-
-  // Sync to sessionStorage
-  useEffect(() => {
-    try {
-      sessionStorage.setItem('my_ai_assistant_chat', JSON.stringify(messages));
-    } catch {
-      // ignore
-    }
-  }, [messages]);
 
   // Auto-scroll to bottom on new messages
   const scrollToBottom = (smooth = true) => {
@@ -305,19 +366,27 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
     setTimeout(() => setStatusMessage(null), 3000);
   };
 
-  const handleSend = async (textToSend?: string, customBaseHistory?: ChatMessage[]) => {
+  const handleSend = async (
+    textToSend?: string,
+    customBaseHistory?: ChatMessage[],
+    skipUserPersistence = false
+  ) => {
     const query = (textToSend || input).trim();
     if (!query || isLoading) return;
 
-    // Use customBaseHistory if provided (e.g. during retry), or remove trailing error messages from current messages
-    const baseHistory = customBaseHistory !== undefined ? customBaseHistory : messages.filter((m) => !m.isError);
+    const baseHistory = customBaseHistory !== undefined
+      ? customBaseHistory
+      : messages.filter((m) => !m.isError);
 
     const userMsgId = `user-${Date.now()}`;
     const userMessage: ChatMessage = {
       id: userMsgId,
       role: 'user',
       text: query,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
     };
 
     const newHistory = [...baseHistory, userMessage];
@@ -326,20 +395,50 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
     setIsLoading(true);
     setStatusMessage(null);
 
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-    }
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
 
-    // Set up AbortController with 30-second client-side timeout
     const controller = new AbortController();
     abortControllerRef.current = controller;
-    const clientTimeoutId = setTimeout(() => {
-      controller.abort();
-    }, 30000);
+    const clientTimeoutId = setTimeout(() => controller.abort(), 30000);
 
     try {
-      // Prepare message history for server
+      const { data: { user }, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      if (!user) throw new Error('Please sign in again to continue.');
+
+      setUserId(user.id);
+      let sessionId = activeSessionIdRef.current;
+
+      if (!skipUserPersistence) {
+        if (!sessionId) {
+          const { data: newSession, error: sessionError } = await supabase
+            .from('chat_sessions')
+            .insert({
+              user_id: user.id,
+              title: query.slice(0, 70) || 'New Chat',
+            })
+            .select('id')
+            .single();
+
+          if (sessionError) throw sessionError;
+
+          sessionId = newSession.id;
+          activeSessionIdRef.current = sessionId;
+          setActiveSessionId(sessionId);
+        }
+
+        const { error: saveUserError } = await supabase
+          .from('chat_messages')
+          .insert({
+            session_id: sessionId,
+            user_id: user.id,
+            role: 'user',
+            content: query,
+          });
+
+        if (saveUserError) throw saveUserError;
+      }
+
       const validMessages = newHistory.map((m) => ({
         role: m.role,
         text: m.text,
@@ -348,6 +447,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       const apiUrl = Capacitor.isNativePlatform()
         ? 'https://my-ai-assistant-8eol.onrender.com/api/chat'
         : '/api/chat';
+
       const response = await fetch(apiUrl, {
         method: 'POST',
         headers: await getAuthHeaders(),
@@ -359,10 +459,13 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
 
       let data: any = {};
       const responseText = await response.text();
+
       try {
         data = JSON.parse(responseText);
       } catch {
-        data = { error: `Server error (${response.status}): ${responseText || 'No response body'}` };
+        data = {
+          error: `Server error (${response.status}): ${responseText || 'No response body'}`,
+        };
       }
 
       if (!response.ok) {
@@ -374,18 +477,44 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
         role: 'assistant',
         text: data.reply || 'No response content returned.',
         model: data.model,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
       };
 
+      if (!sessionId) {
+        throw new Error('Chat session was not created. Please try again.');
+      }
+
+      const { error: saveAssistantError } = await supabase
+        .from('chat_messages')
+        .insert({
+          session_id: sessionId,
+          user_id: user.id,
+          role: 'assistant',
+          content: assistantMessage.text,
+          model: data.model || null,
+        });
+
+      if (saveAssistantError) throw saveAssistantError;
+
+      await supabase
+        .from('chat_sessions')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', sessionId)
+        .eq('user_id', user.id);
+
       setMessages((prev) => [...prev, assistantMessage]);
+      await refreshChatSessions(user.id);
+
     } catch (err: any) {
       clearTimeout(clientTimeoutId);
       console.error('Chat request error:', err);
 
       let friendlyError = 'Sorry, an error occurred while connecting to Gemini. Please try again.';
-
       if (err.name === 'AbortError') {
-        friendlyError = 'Request timed out after 20 seconds. Please tap "Retry question" to try again.';
+        friendlyError = 'Request timed out. Please tap "Retry question" to try again.';
       } else if (err.message) {
         friendlyError = err.message;
       }
@@ -394,13 +523,15 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
         id: `error-${Date.now()}`,
         role: 'assistant',
         text: friendlyError,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        timestamp: new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
         isError: true,
       };
 
       setMessages((prev) => [...prev, errorMsg]);
     } finally {
-      // GUARANTEED: always stop the "Thinking..." state
       abortControllerRef.current = null;
       setIsLoading(false);
     }
@@ -422,11 +553,8 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       if (!confirmClear) return;
     }
     setMessages([]);
-    try {
-      sessionStorage.removeItem('my_ai_assistant_chat');
-    } catch {
-      // ignore
-    }
+    activeSessionIdRef.current = null;
+    setActiveSessionId(null);
     setInput('');
     setStatusMessage('Started a new conversation');
     setTimeout(() => setStatusMessage(null), 3000);
@@ -615,7 +743,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       const withoutErrors = messages.filter((m) => !m.isError);
       const lastUserIdx = withoutErrors.map((m) => m.id).lastIndexOf(lastUserMsg.id);
       const baseHistory = lastUserIdx >= 0 ? withoutErrors.slice(0, lastUserIdx) : [];
-      handleSend(lastUserMsg.text, baseHistory);
+      handleSend(lastUserMsg.text, baseHistory, true);
     }
   };
 
@@ -701,6 +829,14 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
             <span className="hidden xs:inline text-[11px] font-medium">New</span>
           </button>
           <button
+            onClick={() => setShowHistory(true)}
+            className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors"
+            title="Chat History"
+            aria-label="Chat History"
+          >
+            <History className="w-4 h-4" />
+        </button>
+        <button
             onClick={() => setShowMessageWriter(true)}
             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/30 text-xs text-indigo-200 transition-colors"
             title="AI Message Writer"
@@ -726,6 +862,52 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       {statusMessage && (
         <div className="bg-indigo-600/90 text-white text-[11px] font-medium px-4 py-1.5 text-center flex-none">
           {statusMessage}
+        </div>
+      )}
+
+      {showHistory && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <section className="w-full max-w-md max-h-[80dvh] overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-800 p-4">
+              <div>
+                <h2 className="font-bold text-white">Chat History</h2>
+                <p className="text-xs text-slate-400">Your saved conversations</p>
+              </div>
+              <button
+                onClick={() => setShowHistory(false)}
+                className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-white"
+                aria-label="Close history"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="max-h-[60dvh] overflow-y-auto p-3 space-y-2">
+              {isHistoryLoading && (
+                <p className="p-4 text-center text-sm text-slate-400">Loading chats...</p>
+              )}
+              {!isHistoryLoading && chatSessions.length === 0 && (
+                <p className="p-6 text-center text-sm text-slate-400">No saved chats yet. Start a conversation to save it here.</p>
+              )}
+              {chatSessions.map((session: any) => (
+                <button
+                  key={session.id}
+                  onClick={() => void loadChatSession(session.id)}
+                  className={`w-full rounded-xl border p-3 text-left transition-colors ${
+                    activeSessionId === session.id
+                      ? 'border-indigo-500 bg-indigo-500/10'
+                      : 'border-slate-800 bg-slate-950 hover:bg-slate-800'
+                  }`}
+                >
+                  <span className="block truncate text-sm font-medium text-white">
+                    {session.title || 'New Chat'}
+                  </span>
+                  <span className="mt-1 block text-[11px] text-slate-400">
+                    {new Date(session.updated_at).toLocaleString()}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </section>
         </div>
       )}
 
