@@ -10,3 +10,4 @@ coverage/
 # Local backup files
 my-ai-assistant.zip
 package.json.backup
+.env

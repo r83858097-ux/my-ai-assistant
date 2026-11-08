@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI } from '@google/genai';
+import { createClient } from '@supabase/supabase-js';
 
 dotenv.config();
 
@@ -159,6 +160,39 @@ app.get('/download/my-ai-assistant.zip', (_req, res) => {
 
 // Multi-turn conversational chat endpoint
 app.post('/api/chat', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const accessToken = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : '';
+
+  if (!accessToken) {
+    return res.status(401).json({ error: 'Please sign in to use AI Chat.' });
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    console.error('Supabase server authentication configuration is missing.');
+    return res.status(503).json({ error: 'Authentication service is not configured.' });
+  }
+
+  try {
+    const supabaseAuth = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+
+    const { data: { user }, error } = await supabaseAuth.auth.getUser(accessToken);
+
+    if (error || !user) {
+      return res.status(401).json({ error: 'Your session is invalid or expired. Please sign in again.' });
+    }
+  } catch (error) {
+    console.error('Supabase token verification failed:', error);
+    return res.status(503).json({ error: 'Could not verify your account. Please try again.' });
+  }
+
+
   res.setHeader('Content-Type', 'application/json');
 
   const { messages, systemInstruction } = req.body;

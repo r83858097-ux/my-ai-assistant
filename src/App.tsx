@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import AuthGate from './components/AuthGate';
+import { supabase } from './lib/supabase';
 import { Capacitor } from '@capacitor/core';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { SpeechRecognition } from '@capgo/capacitor-speech-recognition';
@@ -20,6 +22,7 @@ import {
   Volume2,
   VolumeX,
   FileText,
+  LogOut,
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -38,6 +41,20 @@ const STARTER_PROMPTS = [
   'What are 5 helpful tips to prepare for a job interview?',
 ];
 
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const { data: { session }, error } = await supabase.auth.getSession();
+
+  if (error) throw error;
+  if (!session?.access_token) {
+    throw new Error('Please sign in again to continue.');
+  }
+
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${session.access_token}`,
+  };
+}
 
 function MessageWriter({
   onClose,
@@ -84,7 +101,7 @@ Requirements:
 
       const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           messages: [{ role: 'user', text: prompt }],
         }),
@@ -212,7 +229,7 @@ Requirements:
   );
 }
 
-export default function App() {
+function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     try {
       const saved = sessionStorage.getItem('my_ai_assistant_chat');
@@ -333,7 +350,7 @@ export default function App() {
         : '/api/chat';
       const response = await fetch(apiUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({ messages: validMessages }),
         signal: controller.signal,
       });
@@ -667,6 +684,14 @@ export default function App() {
 
         <div className="flex items-center gap-1.5">
           <button
+            onClick={onSignOut}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+            title="Sign Out"
+            aria-label="Sign Out"
+          >
+            <LogOut className="w-4 h-4" />
+          </button>
+          <button
             onClick={startNewChat}
             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 transition-colors"
             title="Start New Chat"
@@ -993,5 +1018,14 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+
+export default function App() {
+  return (
+    <AuthGate>
+      {(onSignOut) => <AssistantApp onSignOut={onSignOut} />}
+    </AuthGate>
   );
 }
