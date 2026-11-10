@@ -16,33 +16,135 @@
   </head>
   <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500/30 selection:text-indigo-200">
     <div id="root"></div>
-    
-<script>
-(function () {
-  function showError(message) {
-    let box = document.getElementById('browser-error-box');
-    if (!box) {
-      box = document.createElement('pre');
-      box.id = 'browser-error-box';
-      box.style.cssText = 'position:fixed;inset:0;z-index:999999;background:#090d16;color:#ff7777;padding:20px;white-space:pre-wrap;overflow:auto;font:14px monospace';
-      document.body.appendChild(box);
-    }
-    box.textContent += message + '\\n\\n';
-  }
 
-  window.addEventListener('error', function (e) {
-    showError('BROWSER ERROR: ' + (e.message || 'Resource loading failed') +
-      '\\nFile: ' + (e.filename || 'unknown') +
-      '\\nLine: ' + (e.lineno || 'unknown'));
-  }, true);
+    <script>
+    (function () {
+      if (window.__MY_AI_DEBUG_INSTALLED__) return;
+      window.__MY_AI_DEBUG_INSTALLED__ = true;
 
-  window.addEventListener('unhandledrejection', function (e) {
-    showError('PROMISE ERROR: ' + (e.reason?.stack || e.reason || 'unknown'));
-  });
-})();
-</script>
+      var box;
 
-<script type="module" src="/src/main.tsx"></script>
+      function safeUrl(value) {
+        try {
+          var url = new URL(value, window.location.href);
+          url.searchParams.delete('apikey');
+          url.searchParams.delete('code');
+          url.searchParams.delete('access_token');
+          url.searchParams.delete('refresh_token');
+          return url.origin + url.pathname +
+            (url.search ? '?[query parameters hidden]' : '');
+        } catch (_) {
+          return String(value || 'unknown').slice(0, 300);
+        }
+      }
+
+      function showError(title, details) {
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'browser-error-box';
+          box.style.cssText =
+            'position:fixed;inset:0;z-index:999999;background:#090d16;color:#fca5a5;padding:16px;overflow:auto;font:13px monospace;white-space:pre-wrap;overflow-wrap:anywhere';
+          var heading = document.createElement('div');
+          heading.textContent = 'MY AI ASSISTANT - DEBUG BOX';
+          heading.style.cssText = 'font-size:17px;font-weight:bold;color:#fbbf24;margin-bottom:12px';
+          box.appendChild(heading);
+
+          var actions = document.createElement('div');
+          actions.style.cssText = 'position:sticky;top:0;background:#090d16;padding:8px 0';
+          var copy = document.createElement('button');
+          copy.textContent = 'Copy Debug Logs';
+          copy.style.cssText = 'padding:9px 12px;background:#4f46e5;color:white;border:0;border-radius:7px;margin-right:8px';
+          copy.onclick = function () {
+            var content = box.innerText;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(content).then(function () {
+                copy.textContent = 'Copied';
+              }).catch(function () {
+                copy.textContent = 'Copy failed';
+              });
+            } else {
+              copy.textContent = 'Clipboard unavailable';
+            }
+          };
+          var clear = document.createElement('button');
+          clear.textContent = 'Clear Logs';
+          clear.style.cssText = 'padding:9px 12px;background:#334155;color:white;border:0;border-radius:7px';
+          clear.onclick = function () {
+            var entries = box.querySelectorAll('[data-debug-entry]');
+            entries.forEach(function (entry) { entry.remove(); });
+          };
+          actions.appendChild(copy);
+          actions.appendChild(clear);
+          box.appendChild(actions);
+          document.body.appendChild(box);
+        }
+
+        var entry = document.createElement('pre');
+        entry.setAttribute('data-debug-entry', '1');
+        entry.style.cssText = 'border-top:1px solid #334155;padding:10px 0;margin:0;color:#fecaca';
+        entry.textContent =
+          '[' + new Date().toLocaleTimeString() + '] ' + title +
+          '\n' + (typeof details === 'string' ? details : JSON.stringify(details, null, 2));
+        box.appendChild(entry);
+      }
+
+      window.__MY_AI_DEBUG_LOG__ = function (title, details) {
+        showError(title, details);
+      };
+
+      window.addEventListener('error', function (event) {
+        showError('BROWSER ERROR',
+          'Message: ' + (event.message || 'Resource loading failed') +
+          '\nFile: ' + safeUrl(event.filename || '') +
+          '\nLine: ' + (event.lineno || 'unknown') +
+          '\nColumn: ' + (event.colno || 'unknown'));
+      }, true);
+
+      window.addEventListener('unhandledrejection', function (event) {
+        var reason = event.reason;
+        showError('PROMISE ERROR',
+          reason && (reason.stack || reason.message)
+            ? (reason.stack || reason.message)
+            : String(reason || 'unknown'));
+      });
+
+      var originalFetch = window.fetch;
+      window.fetch = async function (input, init) {
+        var requestUrl = typeof input === 'string' ? input : input && input.url;
+        var isSupabase = requestUrl && requestUrl.indexOf('.supabase.co/') !== -1;
+
+        if (isSupabase) {
+          showError('SUPABASE REQUEST',
+            'URL: ' + safeUrl(requestUrl) +
+            '\nMethod: ' + ((init && init.method) || (input && input.method) || 'GET'));
+        }
+
+        try {
+          var response = await originalFetch.apply(this, arguments);
+          if (isSupabase) {
+            var clone = response.clone();
+            showError('SUPABASE RESPONSE',
+              'URL: ' + safeUrl(requestUrl) +
+              '\nHTTP Status: ' + response.status +
+              '\nStatus Text: ' + response.statusText +
+              '\nOK: ' + response.ok);
+          }
+          return response;
+        } catch (error) {
+          if (isSupabase) {
+            showError('SUPABASE NETWORK ERROR',
+              'URL: ' + safeUrl(requestUrl) +
+              '\nError: ' + (error.message || String(error)));
+          }
+          throw error;
+        }
+      };
+
+      showError('DEBUG READY',
+        'Browser error and Supabase fetch monitoring is active.');
+    })();
+    </script>
+
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-

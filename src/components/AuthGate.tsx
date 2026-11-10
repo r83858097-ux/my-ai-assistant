@@ -77,16 +77,52 @@ export default function AuthGate({ children }: Props) {
     setBusy(true);
     setMessage('');
 
+    const debug = (title: string, details: string) => {
+      (window as any).__MY_AI_DEBUG_LOG__?.(title, details);
+    };
+
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      debug('GOOGLE LOGIN', 'Starting OAuth URL generation...');
+
+      const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
           redirectTo: window.location.origin,
+          skipBrowserRedirect: true,
         },
       });
+
       if (error) throw error;
+
+      if (!data.url) {
+        throw new Error('Supabase did not return an OAuth URL.');
+      }
+
+      const oauthUrl = new URL(data.url);
+
+      debug('GOOGLE OAUTH URL CHECK',
+        'Host: ' + oauthUrl.origin +
+        '\nPath: ' + oauthUrl.pathname +
+        '\nAPI key parameter exists: ' + oauthUrl.searchParams.has('apikey') +
+        '\nAPI key value is non-empty: ' + Boolean(oauthUrl.searchParams.get('apikey')) +
+        '\nRedirect target origin: ' +
+        (oauthUrl.searchParams.get('redirect_to')
+          ? new URL(oauthUrl.searchParams.get('redirect_to')!).origin
+          : 'Not provided')
+      );
+
+      window.location.assign(data.url);
     } catch (error: any) {
-      setMessage(error.message || 'Google login failed.');
+      const safeMessage = String(error?.message || 'Google login failed.')
+        .replace(/(apikey|access_token|refresh_token|code)=([^&\s]+)/gi, '$1=[HIDDEN]');
+
+      debug('GOOGLE LOGIN ERROR',
+        'Name: ' + (error?.name || 'Unknown') +
+        '\nStatus: ' + (error?.status || 'Unknown') +
+        '\nCode: ' + (error?.code || 'Unknown') +
+        '\nMessage: ' + safeMessage);
+
+      setMessage(safeMessage);
       setBusy(false);
     }
   };
