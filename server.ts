@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '8mb' }));
+app.use(express.json({ limit: '24mb' }));
 app.use(cors());
 
 // Dynamic GoogleGenAI client accessor using current GEMINI_API_KEY
@@ -218,7 +218,7 @@ app.post('/api/chat', async (req, res) => {
   }
 
     // Validate an optional image attached to the latest user message.
-  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
   const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
   const imageMessages = messages.filter((m: any) => m && m.image);
 
@@ -247,7 +247,7 @@ app.post('/api/chat', async (req, res) => {
     }
 
     if (!image.data || image.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 8) {
-      return res.status(400).json({ error: 'Image is empty or exceeds the 5 MB limit.' });
+      return res.status(400).json({ error: 'Image is empty or exceeds the 10 MB limit.' });
     }
 
     const decodedImage = Buffer.from(image.data, 'base64');
@@ -257,7 +257,7 @@ app.post('/api/chat', async (req, res) => {
       decodedImage.length > MAX_IMAGE_BYTES ||
       decodedImage.toString('base64') !== image.data
     ) {
-      return res.status(400).json({ error: 'Invalid image data or image exceeds 5 MB.' });
+      return res.status(400).json({ error: 'Invalid image data or image exceeds 10 MB.' });
     }
   }
 

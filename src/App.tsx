@@ -632,45 +632,97 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   };
 
 
-  const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
+  const handleImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    input.value = '';
     if (!file) return;
 
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
 
     if (!allowedTypes.includes(file.type)) {
       setStatusMessage('Only JPG, PNG and WEBP images are supported.');
-      event.target.value = '';
       return;
     }
 
-    if (file.size > 5 * 1024 * 1024) {
-      setStatusMessage('Image must be smaller than 5 MB.');
-      event.target.value = '';
+    if (file.size > 20 * 1024 * 1024) {
+      setStatusMessage('Image must be 20 MB or smaller.');
       return;
     }
 
-    const reader = new FileReader();
+    setStatusMessage('Preparing and compressing image...');
 
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setSelectedImage({
-          dataUrl: reader.result,
-          mimeType: file.type,
-          name: file.name,
-        });
+    const objectUrl = URL.createObjectURL(file);
+
+    try {
+      const image = new Image();
+
+      await new Promise<void>((resolve, reject) => {
+        image.onload = () => resolve();
+        image.onerror = () => reject(new Error('Could not open this image.'));
+        image.src = objectUrl;
+      });
+
+      const maxDimension = 2560;
+      const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Image processing is not supported.');
+
+      context.fillStyle = '#ffffff';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+      const maxOutputBytes = 10 * 1024 * 1024;
+
+      const makeBlob = (type: string, quality?: number) =>
+        new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+
+      let blob: Blob | null = null;
+
+      if (file.type === 'image/png') {
+        blob = await makeBlob('image/png');
       }
-    };
 
-    reader.onerror = () => {
-      setStatusMessage('Could not read this image. Please try another.');
-    };
+      if (!blob || blob.size > maxOutputBytes) {
+        for (const quality of [0.86, 0.78, 0.70, 0.62, 0.54, 0.46]) {
+          blob = await makeBlob('image/jpeg', quality);
+          if (blob && blob.size <= maxOutputBytes) break;
+        }
+      }
 
-    reader.readAsDataURL(file);
-    event.target.value = '';
+      if (!blob || blob.size > maxOutputBytes) {
+        throw new Error('Could not compress this image below 10 MB. Please choose a smaller image.');
+      }
+
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          if (typeof reader.result === 'string') resolve(reader.result);
+          else reject(new Error('Could not read the compressed image.'));
+        };
+        reader.onerror = () => reject(new Error('Could not read this image.'));
+        reader.readAsDataURL(blob);
+      });
+
+      const mimeType = blob.type;
+      setSelectedImage({
+        dataUrl,
+        mimeType,
+        name: file.name,
+      });
+      setStatusMessage('Image ready to send.');
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : 'Could not process this image.');
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSend();
