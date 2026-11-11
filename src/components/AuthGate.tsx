@@ -1,11 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import type { ReactNode, FormEvent } from 'react';
 import type { Session } from '@supabase/supabase-js';
+import { App } from '@capacitor/app';
+import { Browser } from '@capacitor/browser';
+import { Capacitor } from '@capacitor/core';
 import { supabase } from '../lib/supabase';
 
 interface Props {
   children: (onSignOut: () => void) => ReactNode;
 }
+
+const NATIVE_REDIRECT_URL = 'com.myaiassistant.app://auth/callback';
 
 export default function AuthGate({ children }: Props) {
   const [session, setSession] = useState<Session | null>(null);
@@ -18,24 +23,94 @@ export default function AuthGate({ children }: Props) {
 
   useEffect(() => {
     let mounted = true;
+    let removeAppListener: (() => void) | undefined;
+    let callbackInProgress = false;
 
-    supabase.auth.getSession().then(({ data, error }) => {
+    const processOAuthCallback = async (url: string) => {
+      if (!url.startsWith(NATIVE_REDIRECT_URL)) return;
+      if (callbackInProgress) return;
+
+      callbackInProgress = true;
+
+      try {
+        const callbackUrl = new URL(url);
+        const code = callbackUrl.searchParams.get('code');
+        const oauthError = callbackUrl.searchParams.get('error_description');
+
+        if (oauthError) throw new Error(oauthError);
+
+        if (!code) {
+          throw new Error('Google login callback did not contain an authorization code.');
+        }
+
+        const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (error) throw error;
+
+        await Browser.close().catch(() => {});
+        if (mounted) setMessage('');
+      } catch (error: any) {
+        await Browser.close().catch(() => {});
+        if (mounted) {
+          setMessage(error.message || 'Google login callback failed.');
+          setBusy(false);
+        }
+      } finally {
+        callbackInProgress = false;
+      }
+    };
+
+    const initializeAuth = async () => {
+      try {
+        if (Capacitor.isNativePlatform()) {
+          const listener = await App.addListener('appUrlOpen', ({ url }) => {
+            void processOAuthCallback(url);
+          });
+
+          if (mounted) {
+            removeAppListener = () => {
+              void listener.remove();
+            };
+          } else {
+            await listener.remove();
+          }
+
+          const launch = await App.getLaunchUrl();
+
+          if (launch?.url) {
+            await processOAuthCallback(launch.url);
+          }
+        }
+
+        const { data, error } = await supabase.auth.getSession();
+
+        if (!mounted) return;
+
+        if (error) setMessage(error.message);
+        setSession(data.session);
+        setChecking(false);
+      } catch (error: any) {
+        if (mounted) {
+          setMessage(error.message || 'Could not initialize authentication.');
+          setChecking(false);
+        }
+      }
+    };
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
       if (!mounted) return;
-      if (error) setMessage(error.message);
-      setSession(data.session);
+      setSession(nextSession);
       setChecking(false);
+      if (nextSession) setBusy(false);
     });
 
-    const { data: { subscription } } =
-      supabase.auth.onAuthStateChange((_event, nextSession) => {
-        if (!mounted) return;
-        setSession(nextSession);
-        setChecking(false);
-      });
+    void initializeAuth();
 
     return () => {
       mounted = false;
       subscription.unsubscribe();
+      removeAppListener?.();
     };
   }, []);
 
@@ -57,13 +132,16 @@ export default function AuthGate({ children }: Props) {
         if (error) throw error;
 
         if (!data.session) {
-          setMessage('Account created! Please check your email to confirm your account.');
+          setMessage(
+            'Account created! Please check your email to confirm your account.'
+          );
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email: email.trim(),
           password,
         });
+
         if (error) throw error;
       }
     } catch (error: any) {
@@ -77,50 +155,39 @@ export default function AuthGate({ children }: Props) {
     setBusy(true);
     setMessage('');
 
-    const debug = (title: string, details: string) => {
-      (window as any).__MY_AI_DEBUG_LOG__?.(title, details);
-    };
-
     try {
-      debug('GOOGLE LOGIN', 'Starting OAuth URL generation...');
+      const isNative = Capacitor.isNativePlatform();
 
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
         options: {
-          redirectTo: window.location.origin,
+          redirectTo: isNative
+            ? NATIVE_REDIRECT_URL
+            : window.location.origin,
           skipBrowserRedirect: true,
         },
       });
 
       if (error) throw error;
-
       if (!data.url) {
         throw new Error('Supabase did not return an OAuth URL.');
       }
 
-      const oauthUrl = new URL(data.url);
-
-      debug('GOOGLE OAUTH URL CHECK',
-        'Host: ' + oauthUrl.origin +
-        '\nPath: ' + oauthUrl.pathname +
-        '\nAPI key parameter exists: ' + oauthUrl.searchParams.has('apikey') +
-        '\nAPI key value is non-empty: ' + Boolean(oauthUrl.searchParams.get('apikey')) +
-        '\nRedirect target origin: ' +
-        (oauthUrl.searchParams.get('redirect_to')
-          ? new URL(oauthUrl.searchParams.get('redirect_to')!).origin
-          : 'Not provided')
-      );
-
-      window.location.assign(data.url);
+      if (isNative) {
+        await Browser.open({
+          url: data.url,
+          presentationStyle: 'popover',
+        });
+      } else {
+        window.location.assign(data.url);
+      }
     } catch (error: any) {
-      const safeMessage = String(error?.message || 'Google login failed.')
-        .replace(/(apikey|access_token|refresh_token|code)=([^&\s]+)/gi, '$1=[HIDDEN]');
-
-      debug('GOOGLE LOGIN ERROR',
-        'Name: ' + (error?.name || 'Unknown') +
-        '\nStatus: ' + (error?.status || 'Unknown') +
-        '\nCode: ' + (error?.code || 'Unknown') +
-        '\nMessage: ' + safeMessage);
+      const safeMessage = String(
+        error?.message || 'Google login failed.'
+      ).replace(
+        /(apikey|access_token|refresh_token|code)=([^&\s]+)/gi,
+        '$1=[HIDDEN]'
+      );
 
       setMessage(safeMessage);
       setBusy(false);
@@ -189,7 +256,9 @@ export default function AuthGate({ children }: Props) {
             type="password"
             required
             minLength={6}
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+            autoComplete={
+              mode === 'login' ? 'current-password' : 'new-password'
+            }
             placeholder="Password (minimum 6 characters)"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
@@ -201,7 +270,11 @@ export default function AuthGate({ children }: Props) {
             disabled={busy}
             className="w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 py-3 font-semibold disabled:opacity-50"
           >
-            {busy ? 'Please wait...' : mode === 'login' ? 'Sign In' : 'Create Account'}
+            {busy
+              ? 'Please wait...'
+              : mode === 'login'
+                ? 'Sign In'
+                : 'Create Account'}
           </button>
         </form>
 
