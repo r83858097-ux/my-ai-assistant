@@ -22,126 +22,188 @@
       if (window.__MY_AI_DEBUG_INSTALLED__) return;
       window.__MY_AI_DEBUG_INSTALLED__ = true;
 
-      var box;
+      var panel, content, toggle, entries = 0;
 
       function safeUrl(value) {
         try {
-          var url = new URL(value, window.location.href);
-          url.searchParams.delete('apikey');
-          url.searchParams.delete('code');
-          url.searchParams.delete('access_token');
-          url.searchParams.delete('refresh_token');
-          return url.origin + url.pathname +
-            (url.search ? '?[query parameters hidden]' : '');
+          var u = new URL(value, location.href);
+          ['apikey','code','access_token','refresh_token'].forEach(function(k) {
+            u.searchParams.delete(k);
+          });
+          return u.origin + u.pathname +
+            (u.search ? '?[query parameters hidden]' : '');
         } catch (_) {
-          return String(value || 'unknown').slice(0, 300);
+          return String(value || 'unknown').slice(0, 250);
         }
       }
 
-      function showError(title, details) {
-        if (!box) {
-          box = document.createElement('div');
-          box.id = 'browser-error-box';
-          box.style.cssText =
-            'position:fixed;inset:0;z-index:999999;background:#090d16;color:#fca5a5;padding:16px;overflow:auto;font:13px monospace;white-space:pre-wrap;overflow-wrap:anywhere';
-          var heading = document.createElement('div');
-          heading.textContent = 'MY AI ASSISTANT - DEBUG BOX';
-          heading.style.cssText = 'font-size:17px;font-weight:bold;color:#fbbf24;margin-bottom:12px';
-          box.appendChild(heading);
+      function safeText(value) {
+        return String(value || '')
+          .replace(/sb_publishable_[A-Za-z0-9_-]+/g, '[KEY HIDDEN]')
+          .replace(/eyJ[A-Za-z0-9_.-]+/g, '[TOKEN HIDDEN]')
+          .replace(/(apikey|access_token|refresh_token|code)=([^&\s]+)/gi, '$1=[HIDDEN]')
+          .slice(0, 1200);
+      }
 
-          var actions = document.createElement('div');
-          actions.style.cssText = 'position:sticky;top:0;background:#090d16;padding:8px 0';
-          var copy = document.createElement('button');
-          copy.textContent = 'Copy Debug Logs';
-          copy.style.cssText = 'padding:9px 12px;background:#4f46e5;color:white;border:0;border-radius:7px;margin-right:8px';
-          copy.onclick = function () {
-            var content = box.innerText;
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(content).then(function () {
-                copy.textContent = 'Copied';
-              }).catch(function () {
-                copy.textContent = 'Copy failed';
-              });
-            } else {
-              copy.textContent = 'Clipboard unavailable';
-            }
-          };
-          var clear = document.createElement('button');
-          clear.textContent = 'Clear Logs';
-          clear.style.cssText = 'padding:9px 12px;background:#334155;color:white;border:0;border-radius:7px';
-          clear.onclick = function () {
-            var entries = box.querySelectorAll('[data-debug-entry]');
-            entries.forEach(function (entry) { entry.remove(); });
-          };
-          actions.appendChild(copy);
-          actions.appendChild(clear);
-          box.appendChild(actions);
-          document.body.appendChild(box);
+      function createPanel() {
+        if (panel) return;
+
+        panel = document.createElement('section');
+        panel.id = 'my-ai-floating-debug';
+        panel.style.cssText =
+          'position:fixed;top:env(safe-area-inset-top,8px);left:8px;right:8px;' +
+          'z-index:2147483647;max-height:38vh;display:flex;flex-direction:column;' +
+          'background:#101827;color:#e5e7eb;border:1px solid #64748b;' +
+          'border-radius:12px;box-shadow:0 5px 25px #0009;' +
+          'font:12px/1.4 monospace;overflow:hidden;pointer-events:auto';
+
+        var header = document.createElement('div');
+        header.style.cssText =
+          'display:flex;align-items:center;justify-content:space-between;' +
+          'gap:6px;padding:9px;background:#1e293b;flex-shrink:0';
+
+        var title = document.createElement('strong');
+        title.textContent = 'MY AI ASSISTANT · LIVE DEBUG';
+        title.style.color = '#fbbf24';
+
+        var controls = document.createElement('div');
+        controls.style.cssText = 'display:flex;gap:5px';
+
+        function makeButton(label, action) {
+          var btn = document.createElement('button');
+          btn.textContent = label;
+          btn.style.cssText =
+            'padding:6px 9px;border:0;border-radius:6px;' +
+            'background:#475569;color:white;font-size:11px';
+          btn.onclick = action;
+          return btn;
         }
+
+        toggle = makeButton('Minimize', function() {
+          var hidden = content.style.display === 'none';
+          content.style.display = hidden ? 'block' : 'none';
+          toggle.textContent = hidden ? 'Minimize' : 'Expand';
+        });
+
+        var copy = makeButton('Copy', function() {
+          var logs = content.innerText;
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(logs).then(function() {
+              copy.textContent = 'Copied';
+              setTimeout(function() { copy.textContent = 'Copy'; }, 1500);
+            }).catch(function() { copy.textContent = 'Failed'; });
+          } else {
+            copy.textContent = 'Unavailable';
+          }
+        });
+
+        controls.appendChild(copy);
+        controls.appendChild(toggle);
+        header.appendChild(title);
+        header.appendChild(controls);
+
+        content = document.createElement('div');
+        content.style.cssText =
+          'padding:0 10px 8px;overflow:auto;overscroll-behavior:contain;' +
+          'max-height:calc(38vh - 42px)';
+
+        panel.appendChild(header);
+        panel.appendChild(content);
+        document.body.appendChild(panel);
+      }
+
+      function log(title, details) {
+        createPanel();
+        entries++;
 
         var entry = document.createElement('pre');
-        entry.setAttribute('data-debug-entry', '1');
-        entry.style.cssText = 'border-top:1px solid #334155;padding:10px 0;margin:0;color:#fecaca';
+        entry.style.cssText =
+          'white-space:pre-wrap;overflow-wrap:anywhere;margin:0;' +
+          'padding:8px 0;border-top:1px solid #334155;color:#dbeafe';
         entry.textContent =
           '[' + new Date().toLocaleTimeString() + '] ' + title +
-          '\n' + (typeof details === 'string' ? details : JSON.stringify(details, null, 2));
-        box.appendChild(entry);
+          '\n' + safeText(details);
+        content.appendChild(entry);
+        content.scrollTop = content.scrollHeight;
       }
 
-      window.__MY_AI_DEBUG_LOG__ = function (title, details) {
-        showError(title, details);
-      };
+      window.__MY_AI_DEBUG_LOG__ = log;
 
-      window.addEventListener('error', function (event) {
-        showError('BROWSER ERROR',
-          'Message: ' + (event.message || 'Resource loading failed') +
+      window.addEventListener('error', function(event) {
+        log('BROWSER ERROR',
+          'Message: ' + (event.message || 'Unknown') +
           '\nFile: ' + safeUrl(event.filename || '') +
-          '\nLine: ' + (event.lineno || 'unknown') +
-          '\nColumn: ' + (event.colno || 'unknown'));
+          '\nLine: ' + (event.lineno || 'unknown'));
       }, true);
 
-      window.addEventListener('unhandledrejection', function (event) {
-        var reason = event.reason;
-        showError('PROMISE ERROR',
-          reason && (reason.stack || reason.message)
-            ? (reason.stack || reason.message)
-            : String(reason || 'unknown'));
+      window.addEventListener('unhandledrejection', function(event) {
+        var r = event.reason;
+        log('PROMISE ERROR',
+          r && (r.stack || r.message) ? (r.stack || r.message) : String(r));
       });
 
       var originalFetch = window.fetch;
-      window.fetch = async function (input, init) {
-        var requestUrl = typeof input === 'string' ? input : input && input.url;
-        var isSupabase = requestUrl && requestUrl.indexOf('.supabase.co/') !== -1;
 
-        if (isSupabase) {
-          showError('SUPABASE REQUEST',
-            'URL: ' + safeUrl(requestUrl) +
-            '\nMethod: ' + ((init && init.method) || (input && input.method) || 'GET'));
+      window.fetch = async function(input, init) {
+        var requestUrl = typeof input === 'string'
+          ? input : (input && input.url);
+        var isSupabase = requestUrl &&
+          requestUrl.indexOf('.supabase.co/') !== -1;
+
+        if (!isSupabase) {
+          return originalFetch.apply(this, arguments);
         }
+
+        var headers;
+        try {
+          headers = new Headers(
+            init && init.headers
+              ? init.headers
+              : (input instanceof Request ? input.headers : undefined)
+          );
+        } catch (_) {
+          headers = new Headers();
+        }
+
+        log('SUPABASE REQUEST',
+          'URL: ' + safeUrl(requestUrl) +
+          '\nMethod: ' + ((init && init.method) || (input && input.method) || 'GET') +
+          '\napikey header present: ' + headers.has('apikey') +
+          '\napikey header non-empty: ' + Boolean(headers.get('apikey')));
 
         try {
           var response = await originalFetch.apply(this, arguments);
-          if (isSupabase) {
-            var clone = response.clone();
-            showError('SUPABASE RESPONSE',
-              'URL: ' + safeUrl(requestUrl) +
-              '\nHTTP Status: ' + response.status +
-              '\nStatus Text: ' + response.statusText +
-              '\nOK: ' + response.ok);
+          var bodyText = '';
+
+          try {
+            bodyText = await response.clone().text();
+          } catch (_) {}
+
+          var message = '';
+          try {
+            var parsed = JSON.parse(bodyText);
+            message = parsed.message || parsed.error_description ||
+              parsed.error || parsed.hint || '';
+          } catch (_) {
+            message = bodyText;
           }
+
+          log('SUPABASE RESPONSE',
+            'HTTP Status: ' + response.status +
+            '\nOK: ' + response.ok +
+            '\nError details: ' + (message ? safeText(message) : 'No error message'));
+
           return response;
         } catch (error) {
-          if (isSupabase) {
-            showError('SUPABASE NETWORK ERROR',
-              'URL: ' + safeUrl(requestUrl) +
-              '\nError: ' + (error.message || String(error)));
-          }
+          log('SUPABASE NETWORK ERROR',
+            'URL: ' + safeUrl(requestUrl) +
+            '\nError: ' + (error.message || String(error)));
           throw error;
         }
       };
 
-      showError('DEBUG READY',
-        'Browser error and Supabase fetch monitoring is active.');
+      log('DEBUG READY',
+        'Floating debug panel active. The app remains visible underneath.');
     })();
     </script>
 
