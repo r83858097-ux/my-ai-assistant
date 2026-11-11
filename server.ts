@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: '8mb' }));
 app.use(cors());
 
 // Dynamic GoogleGenAI client accessor using current GEMINI_API_KEY
@@ -54,37 +54,47 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message = 'Operation ti
 }
 
 // Normalize conversational turns for Gemini API
-function normalizeConversationTurns(rawMessages: Array<{ role: string; text: string }>) {
-  const cleaned: Array<{ role: 'user' | 'model'; text: string }> = [];
+function normalizeConversationTurns(
+  rawMessages: Array<{
+    role: string;
+    text?: string;
+    image?: { mimeType: string; data: string };
+  }>
+) {
+  const cleaned: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
 
   for (const m of rawMessages) {
     const text = (m.text || '').trim();
-    if (!text) continue;
+    const image = m.image;
+    if (!text && !image) continue;
 
     const role = m.role === 'assistant' || m.role === 'model' ? 'model' : 'user';
+    if (cleaned.length === 0 && role === 'model') continue;
 
-    // If the list is empty and the first message is 'model', skip it (Gemini requires first turn to be 'user')
-    if (cleaned.length === 0 && role === 'model') {
-      continue;
+    let current = cleaned[cleaned.length - 1];
+
+    if (!current || current.role !== role) {
+      current = { role, parts: [] };
+      cleaned.push(current);
     }
 
-    // If the previous turn had the same role, merge them with a newline
-    if (cleaned.length > 0 && cleaned[cleaned.length - 1].role === role) {
-      cleaned[cleaned.length - 1].text += '\n\n' + text;
-    } else {
-      cleaned.push({ role, text });
+    if (text) current.parts.push({ text });
+
+    if (image) {
+      current.parts.push({
+        inlineData: {
+          mimeType: image.mimeType,
+          data: image.data,
+        },
+      });
     }
   }
 
-  // Ensure last turn is user
   if (cleaned.length > 0 && cleaned[cleaned.length - 1].role !== 'user') {
     return [];
   }
 
-  return cleaned.map((c) => ({
-    role: c.role,
-    parts: [{ text: c.text }],
-  }));
+  return cleaned.map((c) => ({ role: c.role, parts: c.parts }));
 }
 
 // Check API and backend status
@@ -205,6 +215,50 @@ app.post('/api/chat', async (req, res) => {
     return res.status(503).json({
       error: 'GEMINI_API_KEY is not set. Please add your GEMINI_API_KEY in Google AI Studio (Settings > Secrets).',
     });
+  }
+
+    // Validate an optional image attached to the latest user message.
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+  const imageMessages = messages.filter((m: any) => m && m.image);
+
+  if (
+    imageMessages.length > 1 ||
+    (imageMessages.length === 1 && imageMessages[0] !== messages[messages.length - 1])
+  ) {
+    return res.status(400).json({ error: 'Please attach one image to the latest message only.' });
+  }
+
+  if (imageMessages.length === 1) {
+    const imageMessage = imageMessages[0];
+    const image = imageMessage.image;
+
+    if (
+      imageMessage.role !== 'user' ||
+      !image ||
+      typeof image.mimeType !== 'string' ||
+      typeof image.data !== 'string'
+    ) {
+      return res.status(400).json({ error: 'Invalid image attachment.' });
+    }
+
+    if (!ALLOWED_IMAGE_TYPES.includes(image.mimeType)) {
+      return res.status(400).json({ error: 'Only JPG, PNG and WEBP images are supported.' });
+    }
+
+    if (!image.data || image.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 8) {
+      return res.status(400).json({ error: 'Image is empty or exceeds the 5 MB limit.' });
+    }
+
+    const decodedImage = Buffer.from(image.data, 'base64');
+
+    if (
+      decodedImage.length === 0 ||
+      decodedImage.length > MAX_IMAGE_BYTES ||
+      decodedImage.toString('base64') !== image.data
+    ) {
+      return res.status(400).json({ error: 'Invalid image data or image exceeds 5 MB.' });
+    }
   }
 
   const formattedContents = normalizeConversationTurns(messages);

@@ -25,6 +25,9 @@ import {
   History,
   Menu,
   LogOut,
+  Pencil,
+  Trash2,
+  ImagePlus,
 } from 'lucide-react';
 
 interface ChatMessage {
@@ -34,6 +37,8 @@ interface ChatMessage {
   timestamp: string;
   model?: string;
   isError?: boolean;
+  imageDataUrl?: string;
+  imageMimeType?: string;
 }
 
 const STARTER_PROMPTS = [
@@ -234,6 +239,7 @@ Requirements:
 function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState<string>('');
+  const [selectedImage, setSelectedImage] = useState<{ dataUrl: string; mimeType: string; name: string } | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showInfoModal, setShowInfoModal] = useState<boolean>(false);
@@ -251,6 +257,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
   const browserRecognitionRef = useRef<any>(null);
 
@@ -301,6 +308,75 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       setStatusMessage(error.message || 'Could not load chat history.');
     } finally {
       setIsHistoryLoading(false);
+    }
+  };
+
+
+  const handleRenameChat = async (session: any) => {
+    const currentTitle = session.title || 'New Chat';
+    const newTitle = window.prompt('Enter new chat name:', currentTitle);
+    if (newTitle === null) return;
+
+    const title = newTitle.trim().slice(0, 70);
+    if (!title || title === currentTitle) return;
+
+    try {
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError) throw authError;
+      if (!user) throw new Error('Please sign in again.');
+
+      const { error } = await supabase
+        .from('chat_sessions')
+        .update({ title })
+        .eq('id', session.id)
+        .eq('user_id', user.id);
+
+      if (error) throw error;
+
+      await refreshChatSessions(user.id);
+      setStatusMessage('Chat renamed successfully.');
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Could not rename chat.');
+    }
+  };
+
+  const handleDeleteChat = async (session: any) => {
+    const confirmed = window.confirm(
+      `Delete "${session.title || 'New Chat'}"? This will permanently delete its messages too.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const { data: { user }, error: authError } = await supabase.auth.getUser();
+      if (authError) throw authError;
+      if (!user) throw new Error('Please sign in again.');
+
+      const { error: messagesError } = await supabase
+        .from('chat_messages')
+        .delete()
+        .eq('session_id', session.id)
+        .eq('user_id', user.id);
+
+      if (messagesError) throw messagesError;
+
+      const { error: sessionError } = await supabase
+        .from('chat_sessions')
+        .delete()
+        .eq('id', session.id)
+        .eq('user_id', user.id);
+
+      if (sessionError) throw sessionError;
+
+      if (activeSessionIdRef.current === session.id) {
+        activeSessionIdRef.current = null;
+        setActiveSessionId(null);
+        setMessages([]);
+      }
+
+      await refreshChatSessions(user.id);
+      setStatusMessage('Chat deleted successfully.');
+    } catch (error: any) {
+      setStatusMessage(error.message || 'Could not delete chat.');
     }
   };
 
@@ -371,9 +447,14 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const handleSend = async (
     textToSend?: string,
     customBaseHistory?: ChatMessage[],
-    skipUserPersistence = false
+    skipUserPersistence = false,
+    imageOverride?: { dataUrl: string; mimeType: string }
   ) => {
-    const query = (textToSend || input).trim();
+    const imageForRequest = skipUserPersistence
+      ? imageOverride || null
+      : selectedImage;
+    const query = (textToSend || input).trim() ||
+      (imageForRequest ? 'Please describe this image.' : '');
     if (!query || isLoading) return;
 
     const baseHistory = customBaseHistory !== undefined
@@ -391,9 +472,14 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       }),
     };
 
+    if (imageForRequest) {
+      userMessage.imageDataUrl = imageForRequest.dataUrl;
+      userMessage.imageMimeType = imageForRequest.mimeType;
+    }
     const newHistory = [...baseHistory, userMessage];
     setMessages(newHistory);
     setInput('');
+    setSelectedImage(null);
     setIsLoading(true);
     setStatusMessage(null);
 
@@ -444,6 +530,12 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       const validMessages = newHistory.map((m) => ({
         role: m.role,
         text: m.text,
+        ...(m.id === userMsgId && imageForRequest ? {
+          image: {
+            mimeType: imageForRequest.mimeType,
+            data: imageForRequest.dataUrl.split(',')[1],
+          },
+        } : {}),
       }));
 
       const apiUrl = Capacitor.isNativePlatform()
@@ -537,6 +629,45 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       abortControllerRef.current = null;
       setIsLoading(false);
     }
+  };
+
+
+  const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+
+    if (!allowedTypes.includes(file.type)) {
+      setStatusMessage('Only JPG, PNG and WEBP images are supported.');
+      event.target.value = '';
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setStatusMessage('Image must be smaller than 5 MB.');
+      event.target.value = '';
+      return;
+    }
+
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setSelectedImage({
+          dataUrl: reader.result,
+          mimeType: file.type,
+          name: file.name,
+        });
+      }
+    };
+
+    reader.onerror = () => {
+      setStatusMessage('Could not read this image. Please try another.');
+    };
+
+    reader.readAsDataURL(file);
+    event.target.value = '';
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -745,7 +876,17 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       const withoutErrors = messages.filter((m) => !m.isError);
       const lastUserIdx = withoutErrors.map((m) => m.id).lastIndexOf(lastUserMsg.id);
       const baseHistory = lastUserIdx >= 0 ? withoutErrors.slice(0, lastUserIdx) : [];
-      handleSend(lastUserMsg.text, baseHistory, true);
+      handleSend(
+        lastUserMsg.text,
+        baseHistory,
+        true,
+        lastUserMsg.imageDataUrl && lastUserMsg.imageMimeType
+          ? {
+              dataUrl: lastUserMsg.imageDataUrl,
+              mimeType: lastUserMsg.imageMimeType,
+            }
+          : undefined
+      );
     }
   };
 
@@ -886,22 +1027,45 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
                 <p className="p-6 text-center text-sm text-slate-400">No saved chats yet. Start a conversation to save it here.</p>
               )}
               {chatSessions.map((session: any) => (
-                <button
+                <div
                   key={session.id}
-                  onClick={() => void loadChatSession(session.id)}
-                  className={`w-full rounded-xl border p-3 text-left transition-colors ${
+                  className={`flex items-center gap-2 rounded-xl border p-2 transition-colors ${
                     activeSessionId === session.id
                       ? 'border-indigo-500 bg-indigo-500/10'
-                      : 'border-slate-800 bg-slate-950 hover:bg-slate-800'
+                      : 'border-slate-800 bg-slate-950'
                   }`}
                 >
-                  <span className="block truncate text-sm font-medium text-white">
-                    {session.title || 'New Chat'}
-                  </span>
-                  <span className="mt-1 block text-[11px] text-slate-400">
-                    {new Date(session.updated_at).toLocaleString()}
-                  </span>
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => void loadChatSession(session.id)}
+                    className="min-w-0 flex-1 p-1 text-left"
+                  >
+                    <span className="block truncate text-sm font-medium text-white">
+                      {session.title || 'New Chat'}
+                    </span>
+                    <span className="mt-1 block text-[11px] text-slate-400">
+                      {new Date(session.updated_at).toLocaleString()}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRenameChat(session)}
+                    className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-indigo-400"
+                    aria-label="Rename chat"
+                    title="Rename chat"
+                  >
+                    <Pencil className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteChat(session)}
+                    className="shrink-0 rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-red-400"
+                    aria-label="Delete chat"
+                    title="Delete chat"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
               ))}
             </div>
           </section>
@@ -972,6 +1136,13 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
                         : 'bg-slate-900 border border-slate-800/80 text-slate-200 rounded-tl-sm'
                     }`}
                   >
+                    {message.imageDataUrl && (
+                      <img
+                        src={message.imageDataUrl}
+                        alt="Uploaded image"
+                        className="mb-2 max-h-64 max-w-full rounded-lg object-contain"
+                      />
+                    )}
                     {message.isError ? (
                       <div className="space-y-2">
                         <div className="font-semibold text-rose-400 flex items-center gap-1.5 text-xs">
@@ -1076,6 +1247,28 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
 
       {/* Input Box Bar */}
       <footer className="flex-none bg-slate-900/90 border-t border-slate-800/80 px-3 py-2.5 sm:px-4 sm:py-3 backdrop-blur-md">
+        {selectedImage && (
+          <div className="mb-2 flex items-center gap-3 rounded-xl border border-indigo-500/30 bg-slate-950 p-2">
+            <img
+              src={selectedImage.dataUrl}
+              alt="Selected image preview"
+              className="h-14 w-14 rounded-lg object-cover"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs text-slate-200">{selectedImage.name}</p>
+              <p className="text-[10px] text-slate-400">Image selected</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSelectedImage(null)}
+              className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-red-400"
+              aria-label="Remove selected image"
+              title="Remove image"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -1083,6 +1276,23 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
           }}
           className="flex items-end gap-2 bg-slate-950 border border-slate-800 focus-within:border-indigo-500/70 rounded-2xl p-1.5 transition-all"
         >
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            className="hidden"
+            onChange={handleImageSelect}
+          />
+          <button
+            type="button"
+            onClick={() => imageInputRef.current?.click()}
+            disabled={isLoading}
+            className="flex-none w-9 h-9 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 hover:text-indigo-300 flex items-center justify-center disabled:opacity-40"
+            title="Choose image"
+            aria-label="Choose image"
+          >
+            <ImagePlus className="w-4 h-4" />
+          </button>
           <button
             type="button"
             onClick={handleVoiceInput}
@@ -1123,7 +1333,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
           ) : (
             <button
               type="submit"
-              disabled={!input.trim()}
+              disabled={!input.trim() && !selectedImage}
               className="flex-none w-9 h-9 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95"
               aria-label="Send message"
             >
