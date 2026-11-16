@@ -30,6 +30,14 @@ import {
   ImagePlus,
 } from 'lucide-react';
 
+interface ChatImage {
+  dataUrl?: string;
+  mimeType: string;
+  name?: string;
+  storagePath?: string;
+  signedUrl?: string;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -37,6 +45,7 @@ interface ChatMessage {
   timestamp: string;
   model?: string;
   isError?: boolean;
+  images?: ChatImage[];
   imageDataUrl?: string;
   imageMimeType?: string;
 }
@@ -239,7 +248,7 @@ Requirements:
 function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState<string>('');
-  const [selectedImage, setSelectedImage] = useState<{ dataUrl: string; mimeType: string; name: string } | null>(null);
+  const [selectedImages, setSelectedImages] = useState<Array<ChatImage & { dataUrl: string; name: string }>>([]);
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [showInfoModal, setShowInfoModal] = useState<boolean>(false);
@@ -281,23 +290,61 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
     try {
       const { data, error } = await supabase
         .from('chat_messages')
-        .select('id, role, content, model, created_at')
+        .select('id, role, content, model, created_at, image_paths')
         .eq('session_id', sessionId)
         .eq('user_id', ownerId)
         .order('created_at', { ascending: true });
 
       if (error) throw error;
 
-      const loadedMessages: ChatMessage[] = (data || []).map((row: any) => ({
-        id: row.id,
-        role: row.role,
-        text: row.content,
-        model: row.model || undefined,
-        timestamp: new Date(row.created_at).toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
-      }));
+      const loadedMessages: ChatMessage[] = await Promise.all(
+        (data || []).map(async (row: any) => {
+          const imagePaths: string[] = Array.isArray(row.image_paths)
+            ? row.image_paths
+            : [];
+
+          const images = await Promise.all(
+            imagePaths.map(async (path: string) => {
+              try {
+                const { data: signedData, error: signedError } =
+                  await supabase.storage
+                    .from('chat-images')
+                    .createSignedUrl(path, 3600);
+
+                if (signedError) throw signedError;
+
+                const extension = path.split('.').pop()?.toLowerCase();
+                const mimeType =
+                  extension === 'png' ? 'image/png' :
+                  extension === 'webp' ? 'image/webp' :
+                  'image/jpeg';
+
+                return {
+                  signedUrl: signedData.signedUrl,
+                  storagePath: path,
+                  mimeType,
+                  name: path.split('/').pop() || 'Uploaded image',
+                };
+              } catch (imageError) {
+                console.warn('Could not load chat image:', imageError);
+                return null;
+              }
+            })
+          );
+
+          return {
+            id: row.id,
+            role: row.role,
+            text: row.content,
+            model: row.model || undefined,
+            timestamp: new Date(row.created_at).toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+            }),
+            images: images.filter((image): image is NonNullable<typeof image> => image !== null),
+          };
+        })
+      );
 
       activeSessionIdRef.current = sessionId;
       setActiveSessionId(sessionId);
@@ -310,7 +357,6 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       setIsHistoryLoading(false);
     }
   };
-
 
   const handleRenameChat = async (session: any) => {
     const currentTitle = session.title || 'New Chat';
@@ -448,13 +494,14 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
     textToSend?: string,
     customBaseHistory?: ChatMessage[],
     skipUserPersistence = false,
-    imageOverride?: { dataUrl: string; mimeType: string }
+    imageOverride?: { dataUrl: string; mimeType: string; name?: string },
+    imageOverrides?: Array<{ dataUrl: string; mimeType: string; name?: string }>
   ) => {
-    const imageForRequest = skipUserPersistence
-      ? imageOverride || null
-      : selectedImage;
+    const imagesForRequest = skipUserPersistence
+      ? imageOverrides || (imageOverride ? [imageOverride] : [])
+      : selectedImages;
     const query = (textToSend || input).trim() ||
-      (imageForRequest ? 'Please describe this image.' : '');
+      (imagesForRequest.length ? 'Please describe these images.' : '');
     if (!query || isLoading) return;
 
     const baseHistory = customBaseHistory !== undefined
@@ -472,14 +519,19 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       }),
     };
 
-    if (imageForRequest) {
-      userMessage.imageDataUrl = imageForRequest.dataUrl;
-      userMessage.imageMimeType = imageForRequest.mimeType;
+    if (imagesForRequest.length) {
+      userMessage.images = imagesForRequest.map((image) => ({
+        dataUrl: image.dataUrl,
+        mimeType: image.mimeType,
+        name: image.name,
+      }));
+      userMessage.imageDataUrl = imagesForRequest[0].dataUrl;
+      userMessage.imageMimeType = imagesForRequest[0].mimeType;
     }
     const newHistory = [...baseHistory, userMessage];
     setMessages(newHistory);
     setInput('');
-    setSelectedImage(null);
+    setSelectedImages([]);
     setIsLoading(true);
     setStatusMessage(null);
 
@@ -515,26 +567,76 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
           setActiveSessionId(sessionId);
         }
 
-        const { error: saveUserError } = await supabase
+        const { data: savedUserMessage, error: saveUserError } = await supabase
           .from('chat_messages')
           .insert({
             session_id: sessionId,
             user_id: user.id,
             role: 'user',
             content: query,
-          });
+          })
+          .select('id')
+          .single();
 
         if (saveUserError) throw saveUserError;
+
+        if (imagesForRequest.length > 0) {
+          const uploadedPaths: string[] = [];
+
+          try {
+            for (let index = 0; index < imagesForRequest.length; index++) {
+              const image = imagesForRequest[index];
+              const extension =
+                image.mimeType === 'image/png' ? 'png' :
+                image.mimeType === 'image/webp' ? 'webp' : 'jpg';
+
+              const path = `${user.id}/${sessionId}/${savedUserMessage.id}/${index + 1}.${extension}`;
+              const imageBlob = await fetch(image.dataUrl).then((result) => {
+                if (!result.ok) throw new Error('Could not prepare an image for upload.');
+                return result.blob();
+              });
+
+              const { error: uploadError } = await supabase.storage
+                .from('chat-images')
+                .upload(path, imageBlob, {
+                  contentType: image.mimeType,
+                  upsert: false,
+                });
+
+              if (uploadError) throw uploadError;
+              uploadedPaths.push(path);
+            }
+
+            const { error: pathsError } = await supabase
+              .from('chat_messages')
+              .update({ image_paths: uploadedPaths })
+              .eq('id', savedUserMessage.id)
+              .eq('user_id', user.id);
+
+            if (pathsError) throw pathsError;
+          } catch (imageSaveError) {
+            if (uploadedPaths.length > 0) {
+              const { error: cleanupError } = await supabase.storage
+                .from('chat-images')
+                .remove(uploadedPaths);
+
+              if (cleanupError) {
+                console.warn('Image upload cleanup failed:', cleanupError);
+              }
+            }
+            throw imageSaveError;
+          }
+        }
       }
 
       const validMessages = newHistory.map((m) => ({
         role: m.role,
         text: m.text,
-        ...(m.id === userMsgId && imageForRequest ? {
-          image: {
-            mimeType: imageForRequest.mimeType,
-            data: imageForRequest.dataUrl.split(',')[1],
-          },
+        ...(m.id === userMsgId && imagesForRequest.length ? {
+          images: imagesForRequest.map((image) => ({
+            mimeType: image.mimeType,
+            data: image.dataUrl.split(',')[1],
+          })),
         } : {}),
       }));
 
@@ -634,91 +736,93 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
 
   const handleImageSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const input = event.currentTarget;
-    const file = input.files?.[0];
+    const files = Array.from(input.files || []);
     input.value = '';
-    if (!file) return;
+
+    if (!files.length) return;
+
+    const remainingSlots = 5 - selectedImages.length;
+    if (remainingSlots <= 0 || files.length > remainingSlots) {
+      setStatusMessage(`You can attach up to 5 images. ${remainingSlots} slot(s) remaining.`);
+      return;
+    }
 
     const allowedTypes = ['image/jpeg', 'image/png', 'image/webp'];
+    const maxOutputBytes = 2 * 1024 * 1024;
+    const processedImages: Array<ChatImage & { dataUrl: string; name: string }> = [];
 
-    if (!allowedTypes.includes(file.type)) {
-      setStatusMessage('Only JPG, PNG and WEBP images are supported.');
-      return;
-    }
-
-    if (file.size > 20 * 1024 * 1024) {
-      setStatusMessage('Image must be 20 MB or smaller.');
-      return;
-    }
-
-    setStatusMessage('Preparing and compressing image...');
-
-    const objectUrl = URL.createObjectURL(file);
+    setStatusMessage('Preparing and compressing images...');
 
     try {
-      const image = new Image();
+      for (const file of files) {
+        if (!allowedTypes.includes(file.type)) {
+          throw new Error('Only JPG, PNG and WEBP images are supported.');
+        }
+        if (file.size > 20 * 1024 * 1024) {
+          throw new Error(`${file.name}: Image must be 20 MB or smaller.`);
+        }
 
-      await new Promise<void>((resolve, reject) => {
-        image.onload = () => resolve();
-        image.onerror = () => reject(new Error('Could not open this image.'));
-        image.src = objectUrl;
-      });
+        const objectUrl = URL.createObjectURL(file);
+        try {
+          const image = new Image();
+          await new Promise<void>((resolve, reject) => {
+            image.onload = () => resolve();
+            image.onerror = () => reject(new Error(`Could not open ${file.name}.`));
+            image.src = objectUrl;
+          });
 
-      const maxDimension = 2560;
-      const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
-      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+          const maxDimension = 2560;
+          const scale = Math.min(1, maxDimension / Math.max(image.naturalWidth, image.naturalHeight));
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+          canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
 
-      const context = canvas.getContext('2d');
-      if (!context) throw new Error('Image processing is not supported.');
+          const context = canvas.getContext('2d');
+          if (!context) throw new Error('Image processing is not supported.');
 
-      context.fillStyle = '#ffffff';
-      context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+          context.fillStyle = '#ffffff';
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.drawImage(image, 0, 0, canvas.width, canvas.height);
 
-      const maxOutputBytes = 10 * 1024 * 1024;
+          const makeBlob = (type: string, quality?: number) =>
+            new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
 
-      const makeBlob = (type: string, quality?: number) =>
-        new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+          let blob: Blob | null = null;
+          if (file.type === 'image/png') {
+            blob = await makeBlob('image/png');
+          }
 
-      let blob: Blob | null = null;
+          if (!blob || blob.size > maxOutputBytes) {
+            for (const quality of [0.86, 0.78, 0.70, 0.62, 0.54, 0.46, 0.38, 0.30]) {
+              blob = await makeBlob('image/jpeg', quality);
+              if (blob && blob.size <= maxOutputBytes) break;
+            }
+          }
 
-      if (file.type === 'image/png') {
-        blob = await makeBlob('image/png');
-      }
+          if (!blob || blob.size > maxOutputBytes) {
+            throw new Error(`${file.name}: Could not compress below 2 MB.`);
+          }
 
-      if (!blob || blob.size > maxOutputBytes) {
-        for (const quality of [0.86, 0.78, 0.70, 0.62, 0.54, 0.46]) {
-          blob = await makeBlob('image/jpeg', quality);
-          if (blob && blob.size <= maxOutputBytes) break;
+          const dataUrl = await new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => {
+              if (typeof reader.result === 'string') resolve(reader.result);
+              else reject(new Error(`Could not read ${file.name}.`));
+            };
+            reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+            reader.readAsDataURL(blob);
+          });
+
+          processedImages.push({ dataUrl, mimeType: blob.type, name: file.name });
+        } finally {
+          URL.revokeObjectURL(objectUrl);
         }
       }
 
-      if (!blob || blob.size > maxOutputBytes) {
-        throw new Error('Could not compress this image below 10 MB. Please choose a smaller image.');
-      }
-
-      const dataUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => {
-          if (typeof reader.result === 'string') resolve(reader.result);
-          else reject(new Error('Could not read the compressed image.'));
-        };
-        reader.onerror = () => reject(new Error('Could not read this image.'));
-        reader.readAsDataURL(blob);
-      });
-
-      const mimeType = blob.type;
-      setSelectedImage({
-        dataUrl,
-        mimeType,
-        name: file.name,
-      });
-      setStatusMessage('Image ready to send.');
+      setSelectedImages(previous => [...previous, ...processedImages]);
+      setStatusMessage(`${processedImages.length} image(s) ready to send.`);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : 'Could not process this image.');
-    } finally {
-      URL.revokeObjectURL(objectUrl);
+      setStatusMessage(error instanceof Error ? error.message : 'Could not process these images.');
     }
   };
 
@@ -922,22 +1026,56 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     }
   };
 
-  const retryLastMessage = () => {
+  const retryLastMessage = async () => {
     const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+
     if (lastUserMsg) {
       const withoutErrors = messages.filter((m) => !m.isError);
       const lastUserIdx = withoutErrors.map((m) => m.id).lastIndexOf(lastUserMsg.id);
       const baseHistory = lastUserIdx >= 0 ? withoutErrors.slice(0, lastUserIdx) : [];
-      handleSend(
+
+      let retryImages: Array<{ dataUrl: string; mimeType: string; name?: string }> = [];
+
+      if (lastUserMsg.images?.length) {
+        for (const image of lastUserMsg.images) {
+          let dataUrl = image.dataUrl;
+
+          if (!dataUrl && image.signedUrl) {
+            const response = await fetch(image.signedUrl);
+            if (!response.ok) {
+              throw new Error('Could not reload an attached image for retry.');
+            }
+            const blob = await response.blob();
+
+            dataUrl = await new Promise<string>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result));
+              reader.onerror = () => reject(new Error('Could not read an attached image.'));
+              reader.readAsDataURL(blob);
+            });
+          }
+
+          if (dataUrl) {
+            retryImages.push({
+              dataUrl,
+              mimeType: image.mimeType,
+              name: image.name,
+            });
+          }
+        }
+      } else if (lastUserMsg.imageDataUrl && lastUserMsg.imageMimeType) {
+        retryImages = [{
+          dataUrl: lastUserMsg.imageDataUrl,
+          mimeType: lastUserMsg.imageMimeType,
+        }];
+      }
+
+      await handleSend(
         lastUserMsg.text,
         baseHistory,
         true,
-        lastUserMsg.imageDataUrl && lastUserMsg.imageMimeType
-          ? {
-              dataUrl: lastUserMsg.imageDataUrl,
-              mimeType: lastUserMsg.imageMimeType,
-            }
-          : undefined
+        undefined,
+        retryImages
       );
     }
   };
@@ -1188,13 +1326,27 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
                         : 'bg-slate-900 border border-slate-800/80 text-slate-200 rounded-tl-sm'
                     }`}
                   >
-                    {message.imageDataUrl && (
+                    {message.images?.length ? (
+                      <div className="mb-2 flex flex-wrap gap-2">
+                        {message.images.map((image, index) => {
+                          const imageSrc = image.dataUrl || image.signedUrl;
+                          return imageSrc ? (
+                            <img
+                              key={`${message.id}-image-${index}`}
+                              src={imageSrc}
+                              alt={`Uploaded image ${index + 1}`}
+                              className="max-h-64 max-w-full rounded-lg object-contain"
+                            />
+                          ) : null;
+                        })}
+                      </div>
+                    ) : message.imageDataUrl ? (
                       <img
                         src={message.imageDataUrl}
                         alt="Uploaded image"
                         className="mb-2 max-h-64 max-w-full rounded-lg object-contain"
                       />
-                    )}
+                    ) : null}
                     {message.isError ? (
                       <div className="space-y-2">
                         <div className="font-semibold text-rose-400 flex items-center gap-1.5 text-xs">
@@ -1299,26 +1451,34 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
 
       {/* Input Box Bar */}
       <footer className="flex-none bg-slate-900/90 border-t border-slate-800/80 px-3 py-2.5 sm:px-4 sm:py-3 backdrop-blur-md">
-        {selectedImage && (
-          <div className="mb-2 flex items-center gap-3 rounded-xl border border-indigo-500/30 bg-slate-950 p-2">
-            <img
-              src={selectedImage.dataUrl}
-              alt="Selected image preview"
-              className="h-14 w-14 rounded-lg object-cover"
-            />
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-xs text-slate-200">{selectedImage.name}</p>
-              <p className="text-[10px] text-slate-400">Image selected</p>
+        {selectedImages.length > 0 && (
+          <div className="mb-2 rounded-xl border border-indigo-500/30 bg-slate-950 p-2">
+            <p className="mb-2 text-[10px] text-slate-400">
+              {selectedImages.length}/5 images selected
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {selectedImages.map((image, index) => (
+                <div
+                  key={`${image.name}-${index}`}
+                  className="relative h-16 w-16"
+                >
+                  <img
+                    src={image.dataUrl}
+                    alt={`Selected image ${index + 1}`}
+                    className="h-16 w-16 rounded-lg object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setSelectedImages(previous => previous.filter((_, i) => i !== index))}
+                    className="absolute -right-1 -top-1 rounded-full bg-slate-800 p-1 text-red-400"
+                    aria-label={`Remove image ${index + 1}`}
+                    title="Remove image"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
             </div>
-            <button
-              type="button"
-              onClick={() => setSelectedImage(null)}
-              className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-red-400"
-              aria-label="Remove selected image"
-              title="Remove image"
-            >
-              <X className="h-4 w-4" />
-            </button>
           </div>
         )}
         <form
@@ -1332,6 +1492,7 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
             ref={imageInputRef}
             type="file"
             accept="image/jpeg,image/png,image/webp"
+            multiple
             className="hidden"
             onChange={handleImageSelect}
           />
@@ -1385,7 +1546,7 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
           ) : (
             <button
               type="submit"
-              disabled={!input.trim() && !selectedImage}
+              disabled={!input.trim() && selectedImages.length === 0}
               className="flex-none w-9 h-9 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-40 disabled:hover:bg-indigo-600 text-white flex items-center justify-center transition-all shadow-md shadow-indigo-600/30 active:scale-95"
               aria-label="Send message"
             >

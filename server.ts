@@ -59,20 +59,23 @@ function normalizeConversationTurns(
     role: string;
     text?: string;
     image?: { mimeType: string; data: string };
+    images?: Array<{ mimeType: string; data: string }>;
   }>
 ) {
   const cleaned: Array<{ role: 'user' | 'model'; parts: any[] }> = [];
 
   for (const m of rawMessages) {
     const text = (m.text || '').trim();
-    const image = m.image;
-    if (!text && !image) continue;
+    const images = Array.isArray(m.images)
+      ? m.images
+      : m.image ? [m.image] : [];
+
+    if (!text && images.length === 0) continue;
 
     const role = m.role === 'assistant' || m.role === 'model' ? 'model' : 'user';
     if (cleaned.length === 0 && role === 'model') continue;
 
     let current = cleaned[cleaned.length - 1];
-
     if (!current || current.role !== role) {
       current = { role, parts: [] };
       cleaned.push(current);
@@ -80,7 +83,7 @@ function normalizeConversationTurns(
 
     if (text) current.parts.push({ text });
 
-    if (image) {
+    for (const image of images) {
       current.parts.push({
         inlineData: {
           mimeType: image.mimeType,
@@ -217,47 +220,86 @@ app.post('/api/chat', async (req, res) => {
     });
   }
 
-    // Validate an optional image attached to the latest user message.
-  const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+    // Validate images attached to the latest user message.
+  const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+  const MAX_IMAGES = 5;
   const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
-  const imageMessages = messages.filter((m: any) => m && m.image);
+
+  const imageMessages = messages.filter((m: any) =>
+    m && (m.image || (Array.isArray(m.images) && m.images.length > 0))
+  );
 
   if (
     imageMessages.length > 1 ||
-    (imageMessages.length === 1 && imageMessages[0] !== messages[messages.length - 1])
+    (imageMessages.length === 1 &&
+      imageMessages[0] !== messages[messages.length - 1])
   ) {
-    return res.status(400).json({ error: 'Please attach one image to the latest message only.' });
+    return res.status(400).json({
+      error: 'Please attach images to the latest message only.',
+    });
   }
 
   if (imageMessages.length === 1) {
     const imageMessage = imageMessages[0];
-    const image = imageMessage.image;
 
-    if (
-      imageMessage.role !== 'user' ||
-      !image ||
-      typeof image.mimeType !== 'string' ||
-      typeof image.data !== 'string'
-    ) {
+    if (imageMessage.role !== 'user' || (imageMessage.image && imageMessage.images)) {
       return res.status(400).json({ error: 'Invalid image attachment.' });
     }
 
-    if (!ALLOWED_IMAGE_TYPES.includes(image.mimeType)) {
-      return res.status(400).json({ error: 'Only JPG, PNG and WEBP images are supported.' });
+    const images = Array.isArray(imageMessage.images)
+      ? imageMessage.images
+      : imageMessage.image ? [imageMessage.image] : [];
+
+    if (images.length === 0 || images.length > MAX_IMAGES) {
+      return res.status(400).json({ error: 'You can attach up to 5 images at a time.' });
     }
 
-    if (!image.data || image.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 8) {
-      return res.status(400).json({ error: 'Image is empty or exceeds the 10 MB limit.' });
-    }
+    let totalImageBytes = 0;
 
-    const decodedImage = Buffer.from(image.data, 'base64');
+    for (const image of images) {
+      if (
+        !image ||
+        typeof image.mimeType !== 'string' ||
+        typeof image.data !== 'string'
+      ) {
+        return res.status(400).json({ error: 'Invalid image attachment.' });
+      }
 
-    if (
-      decodedImage.length === 0 ||
-      decodedImage.length > MAX_IMAGE_BYTES ||
-      decodedImage.toString('base64') !== image.data
-    ) {
-      return res.status(400).json({ error: 'Invalid image data or image exceeds 10 MB.' });
+      if (!ALLOWED_IMAGE_TYPES.includes(image.mimeType)) {
+        return res.status(400).json({
+          error: 'Only JPG, PNG and WEBP images are supported.',
+        });
+      }
+
+      if (
+        !image.data ||
+        image.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 8
+      ) {
+        return res.status(400).json({
+          error: 'An image is empty or exceeds the 2 MB limit.',
+        });
+      }
+
+      const decodedImage = Buffer.from(image.data, 'base64');
+
+      if (
+        decodedImage.length === 0 ||
+        decodedImage.length > MAX_IMAGE_BYTES ||
+        decodedImage.toString('base64') !== image.data
+      ) {
+        return res.status(400).json({
+          error: 'Invalid image data or image exceeds the 2 MB limit.',
+        });
+      }
+
+      totalImageBytes += decodedImage.length;
+
+      if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+        return res.status(400).json({
+          error: 'The combined image size must not exceed 10 MB.',
+        });
+      }
     }
   }
 
