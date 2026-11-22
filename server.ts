@@ -376,6 +376,262 @@ app.post('/api/chat', async (req, res) => {
   });
 });
 
+
+// Streaming chat endpoint. Keeps the existing /api/chat endpoint unchanged.
+app.post('/api/chat/stream', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const accessToken = authHeader?.startsWith('Bearer ')
+    ? authHeader.slice(7).trim()
+    : '';
+
+  if (!accessToken) {
+    return res.status(401).json({ error: 'Please sign in to use AI Chat.' });
+  }
+
+  const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const supabaseKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+
+  if (!supabaseUrl || !supabaseKey) {
+    return res.status(503).json({ error: 'Authentication service is not configured.' });
+  }
+
+  try {
+    const supabaseAuth = createClient(supabaseUrl, supabaseKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+    const { data: { user }, error } = await supabaseAuth.auth.getUser(accessToken);
+
+    if (error || !user) {
+      return res.status(401).json({
+        error: 'Your session is invalid or expired. Please sign in again.',
+      });
+    }
+  } catch (error) {
+    console.error('Streaming auth verification failed:', error);
+    return res.status(503).json({
+      error: 'Could not verify your account. Please try again.',
+    });
+  }
+
+  const { messages, systemInstruction } = req.body;
+
+  if (!Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({
+      error: 'Messages list is required and cannot be empty.',
+    });
+  }
+
+  if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'MY_GEMINI_API_KEY') {
+    return res.status(503).json({
+      error: 'GEMINI_API_KEY is not configured.',
+    });
+  }
+
+  // Apply the same image restrictions as the regular chat endpoint.
+  const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+  const MAX_TOTAL_IMAGE_BYTES = 10 * 1024 * 1024;
+  const MAX_IMAGES = 5;
+  const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+
+  const imageMessages = messages.filter((m: any) =>
+    m && (m.image || (Array.isArray(m.images) && m.images.length > 0))
+  );
+
+  if (
+    imageMessages.length > 1 ||
+    (imageMessages.length === 1 && imageMessages[0] !== messages[messages.length - 1])
+  ) {
+    return res.status(400).json({
+      error: 'Please attach images to the latest message only.',
+    });
+  }
+
+  if (imageMessages.length === 1) {
+    const imageMessage = imageMessages[0];
+
+    if (imageMessage.role !== 'user' || (imageMessage.image && imageMessage.images)) {
+      return res.status(400).json({ error: 'Invalid image attachment.' });
+    }
+
+    const images = Array.isArray(imageMessage.images)
+      ? imageMessage.images
+      : imageMessage.image ? [imageMessage.image] : [];
+
+    if (images.length === 0 || images.length > MAX_IMAGES) {
+      return res.status(400).json({
+        error: 'You can attach up to 5 images at a time.',
+      });
+    }
+
+    let totalImageBytes = 0;
+
+    for (const image of images) {
+      if (
+        !image ||
+        typeof image.mimeType !== 'string' ||
+        typeof image.data !== 'string'
+      ) {
+        return res.status(400).json({ error: 'Invalid image attachment.' });
+      }
+
+      if (!ALLOWED_IMAGE_TYPES.includes(image.mimeType)) {
+        return res.status(400).json({
+          error: 'Only JPG, PNG and WEBP images are supported.',
+        });
+      }
+
+      if (
+        !image.data ||
+        image.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 8
+      ) {
+        return res.status(400).json({
+          error: 'An image is empty or exceeds the 2 MB limit.',
+        });
+      }
+
+      const decodedImage = Buffer.from(image.data, 'base64');
+
+      if (
+        decodedImage.length === 0 ||
+        decodedImage.length > MAX_IMAGE_BYTES ||
+        decodedImage.toString('base64') !== image.data
+      ) {
+        return res.status(400).json({
+          error: 'Invalid image data or image exceeds the 2 MB limit.',
+        });
+      }
+
+      totalImageBytes += decodedImage.length;
+
+      if (totalImageBytes > MAX_TOTAL_IMAGE_BYTES) {
+        return res.status(400).json({
+          error: 'The combined image size must not exceed 10 MB.',
+        });
+      }
+    }
+  }
+
+  const formattedContents = normalizeConversationTurns(messages);
+
+  if (formattedContents.length === 0) {
+    return res.status(400).json({
+      error: 'Valid conversation turns could not be parsed.',
+    });
+  }
+
+  const defaultInstruction =
+    'You are "My AI Assistant", a thoughtful, friendly, and helpful AI assistant designed for mobile chat. Give clear, well-structured, easy-to-read answers with appropriate formatting, bullet points, or code blocks when helpful.';
+
+  const ai = getGeminiClient();
+  const start = performance.now();
+  const candidateModels = [PRIMARY_MODEL, FALLBACK_MODEL, THIRD_FALLBACK_MODEL];
+
+  let selectedIterator: AsyncIterator<any> | null = null;
+  let selectedModel = '';
+  let firstChunk: any = null;
+  let lastError: any = null;
+
+  // Try another model only if the first chunk fails before streaming starts.
+  for (const model of candidateModels) {
+    try {
+      const stream = await ai.models.generateContentStream({
+        model,
+        contents: formattedContents,
+        config: {
+          systemInstruction: systemInstruction || defaultInstruction,
+        },
+      });
+
+      const iterator = stream[Symbol.asyncIterator]();
+      const first = await withTimeout(
+        iterator.next(),
+        15000,
+        `Model ${model} did not start streaming within 15 seconds`
+      );
+
+      if (first.done) {
+        throw new Error(`Model ${model} returned an empty stream.`);
+      }
+
+      selectedIterator = iterator;
+      selectedModel = model;
+      firstChunk = first.value;
+      break;
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`Streaming model ${model} failed before first chunk:`, err?.message || err);
+    }
+  }
+
+  if (!selectedIterator) {
+    const message = lastError?.message || 'Failed to start Gemini streaming response.';
+    return res.status(500).json({ error: message });
+  }
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  let disconnected = false;
+  let fullReply = '';
+
+  res.on('close', () => {
+    disconnected = true;
+  });
+
+  const sendEvent = (payload: any) => {
+    if (!disconnected && !res.writableEnded) {
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    }
+  };
+
+  sendEvent({ type: 'start', model: selectedModel });
+
+  try {
+    const firstText = firstChunk?.text || '';
+
+    if (firstText) {
+      fullReply += firstText;
+      sendEvent({ type: 'chunk', text: firstText });
+    }
+
+    while (!disconnected) {
+      const next = await selectedIterator.next();
+
+      if (next.done) break;
+
+      const chunkText = next.value?.text || '';
+
+      if (chunkText) {
+        fullReply += chunkText;
+        sendEvent({ type: 'chunk', text: chunkText });
+      }
+    }
+
+    if (!disconnected) {
+      sendEvent({
+        type: 'done',
+        model: selectedModel,
+        latencyMs: Math.round(performance.now() - start),
+        reply: fullReply || 'No response content generated.',
+      });
+    }
+  } catch (err: any) {
+    console.error('Streaming generation failed:', err?.message || err);
+    sendEvent({
+      type: 'error',
+      error: fullReply
+        ? 'The response was interrupted. Please retry if it is incomplete.'
+        : (err?.message || 'Streaming response failed. Please try again.'),
+    });
+  } finally {
+    if (!res.writableEnded) res.end();
+  }
+});
+
 // Setup dev server middlewares or static production serving
 async function bootstrap() {
   if (process.env.NODE_ENV === 'production') {

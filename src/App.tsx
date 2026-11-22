@@ -540,6 +540,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const clientTimeoutId = setTimeout(() => controller.abort(), 30000);
+      let streamingMessageId: string | null = null;
 
     try {
       const { data: { user }, error: userError } = await supabase.auth.getUser();
@@ -641,8 +642,8 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
       }));
 
       const apiUrl = Capacitor.isNativePlatform()
-        ? 'https://my-ai-assistant-8eol.onrender.com/api/chat'
-        : '/api/chat';
+        ? 'https://my-ai-assistant-8eol.onrender.com/api/chat/stream'
+        : '/api/chat/stream';
 
       const response = await fetch(apiUrl, {
         method: 'POST',
@@ -651,37 +652,103 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
         signal: controller.signal,
       });
 
-      clearTimeout(clientTimeoutId);
-
-      let data: any = {};
-      const responseText = await response.text();
-
-      try {
-        data = JSON.parse(responseText);
-      } catch {
-        data = {
-          error: `Server error (${response.status}): ${responseText || 'No response body'}`,
-        };
-      }
-
       if (!response.ok) {
-        throw new Error(data.error || 'Failed to get response from Gemini.');
+        const responseText = await response.text();
+        let errorData: any = {};
+        try {
+          errorData = JSON.parse(responseText);
+        } catch {
+          errorData = { error: `Server error (${response.status}): ${responseText || 'No response body'}` };
+        }
+        throw new Error(errorData.error || 'Failed to get response from Gemini.');
       }
 
-      const assistantMessage: ChatMessage = {
-        id: `assistant-${Date.now()}`,
+      if (!response.body) {
+        throw new Error('Streaming is not supported by this connection.');
+      }
+
+      streamingMessageId = `assistant-${Date.now()}`;
+      setMessages((prev) => [...prev, {
+        id: streamingMessageId!,
         role: 'assistant',
-        text: data.reply || 'No response content returned.',
-        model: data.model,
-        timestamp: new Date().toLocaleTimeString([], {
-          hour: '2-digit',
-          minute: '2-digit',
-        }),
+        text: '…',
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      }]);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let streamedText = '';
+      let streamModel: string | undefined;
+      let streamCompleted = false;
+
+      const processStreamEvent = (block: string) => {
+        const data = block.split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n');
+        if (!data) return;
+
+        let event: any;
+        try {
+          event = JSON.parse(data);
+        } catch {
+          throw new Error('Invalid streaming response from server.');
+        }
+
+        if (event.type === 'start') {
+          streamModel = event.model;
+        } else if (event.type === 'chunk') {
+          if (typeof event.text === 'string') {
+            streamedText += event.text;
+            setMessages((prev) => prev.map((message) =>
+              message.id === streamingMessageId
+                ? { ...message, text: streamedText, model: streamModel }
+                : message
+            ));
+          }
+        } else if (event.type === 'done') {
+          streamCompleted = true;
+          if (typeof event.reply === 'string') streamedText = event.reply;
+          streamModel = event.model || streamModel;
+        } else if (event.type === 'error') {
+          throw new Error(event.error || 'Streaming response failed.');
+        }
       };
 
-      if (!sessionId) {
-        throw new Error('Chat session was not created. Please try again.');
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          buffer += decoder.decode();
+          break;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        buffer = buffer.replace(/\r\n/g, '\n');
+
+        let separator = buffer.indexOf('\n\n');
+        while (separator !== -1) {
+          processStreamEvent(buffer.slice(0, separator));
+          buffer = buffer.slice(separator + 2);
+          separator = buffer.indexOf('\n\n');
+        }
       }
+
+      if (buffer.trim()) processStreamEvent(buffer);
+      if (!streamCompleted) {
+        throw new Error('Streaming ended before the response was complete. Please retry.');
+      }
+
+      clearTimeout(clientTimeoutId);
+
+      const assistantMessage: ChatMessage = {
+        id: streamingMessageId,
+        role: 'assistant',
+        text: streamedText || 'No response content returned.',
+        model: streamModel,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+
+      if (!sessionId) throw new Error('Chat session was not created. Please try again.');
 
       const { error: saveAssistantError } = await supabase
         .from('chat_messages')
@@ -690,7 +757,7 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
           user_id: user.id,
           role: 'assistant',
           content: assistantMessage.text,
-          model: data.model || null,
+          model: streamModel || null,
         });
 
       if (saveAssistantError) throw saveAssistantError;
@@ -701,9 +768,16 @@ function AssistantApp({ onSignOut }: { onSignOut: () => void }) {
         .eq('id', sessionId)
         .eq('user_id', user.id);
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      setMessages((prev) => prev.map((message) =>
+        message.id === streamingMessageId ? assistantMessage : message
+      ));
       await refreshChatSessions(user.id);
 
+      if (streamingMessageId) {
+        setMessages((prev) =>
+          prev.filter((message) => !(message.id === streamingMessageId && message.text === '…'))
+        );
+      }
     } catch (err: any) {
       clearTimeout(clientTimeoutId);
       console.error('Chat request error:', err);
