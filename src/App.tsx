@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import AuthGate from './components/AuthGate';
 import { supabase } from './lib/supabase';
 import { Capacitor } from '@capacitor/core';
@@ -1154,46 +1156,41 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     }
   };
 
-  // Helper to render formatted markdown-like text safely
-  const renderFormattedText = (content: string) => {
-    const lines = content.split('\n');
-    return lines.map((line, idx) => {
-      if (line.startsWith('```')) {
-        return (
-          <div key={idx} className="my-1 font-mono text-[11px] text-indigo-300 opacity-60">
-            {line}
-          </div>
-        );
-      }
-
-      if (line.trim().startsWith('- ') || line.trim().startsWith('* ')) {
-        return (
-          <div key={idx} className="flex items-start gap-2 my-0.5 pl-1">
-            <span className="text-indigo-400 font-bold leading-5">•</span>
-            <span className="flex-1 leading-relaxed">{line.trim().replace(/^[-*]\s+/, '')}</span>
-          </div>
-        );
-      }
-
-      if (/^\d+\.\s/.test(line.trim())) {
-        return (
-          <div key={idx} className="my-0.5 pl-1 leading-relaxed">
-            {line}
-          </div>
-        );
-      }
-
-      if (!line.trim()) {
-        return <div key={idx} className="h-2" />;
-      }
-
-      return (
-        <p key={idx} className="my-0.5 leading-relaxed">
-          {line}
-        </p>
-      );
-    });
-  };
+  // Render AI responses as properly formatted Markdown
+  const renderFormattedText = (content: string) => (
+    <div className="markdown-content min-w-0 break-words text-xs leading-relaxed space-y-2">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => <h1 className="text-lg font-bold text-white mt-3 mb-2">{children}</h1>,
+          h2: ({ children }) => <h2 className="text-base font-bold text-white mt-3 mb-2">{children}</h2>,
+          h3: ({ children }) => <h3 className="text-sm font-bold text-white mt-2 mb-1">{children}</h3>,
+          h4: ({ children }) => <h4 className="font-bold text-white mt-2 mb-1">{children}</h4>,
+          p: ({ children }) => <p className="my-1 leading-relaxed">{children}</p>,
+          strong: ({ children }) => <strong className="font-bold text-white">{children}</strong>,
+          em: ({ children }) => <em className="italic">{children}</em>,
+          ul: ({ children }) => <ul className="list-disc pl-5 my-2 space-y-1">{children}</ul>,
+          ol: ({ children }) => <ol className="list-decimal pl-5 my-2 space-y-1">{children}</ol>,
+          li: ({ children }) => <li className="pl-1">{children}</li>,
+          blockquote: ({ children }) => <blockquote className="border-l-2 border-indigo-400 pl-3 my-2 text-slate-300">{children}</blockquote>,
+          hr: () => <hr className="border-slate-700 my-3" />,
+          a: ({ children, href }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-300 underline">{children}</a>,
+          code: ({ children, className }) => {
+            const isBlock = Boolean(className);
+            return isBlock
+              ? <code className="block whitespace-pre overflow-x-auto rounded-lg bg-slate-900 p-3 my-2 text-indigo-200 font-mono text-[11px]">{children}</code>
+              : <code className="rounded bg-slate-800 px-1 py-0.5 text-indigo-200 font-mono text-[11px]">{children}</code>;
+          },
+          pre: ({ children }) => <pre className="overflow-x-auto max-w-full">{children}</pre>,
+          table: ({ children }) => <div className="overflow-x-auto my-2"><table className="min-w-full border-collapse text-left">{children}</table></div>,
+          th: ({ children }) => <th className="border border-slate-700 bg-slate-800 px-2 py-1 font-semibold">{children}</th>,
+          td: ({ children }) => <td className="border border-slate-700 px-2 py-1">{children}</td>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
 
   return (
     <div className="flex flex-col h-[100dvh] w-full max-w-lg mx-auto bg-slate-950 text-slate-100 font-sans shadow-2xl overflow-hidden sm:border-x sm:border-slate-800">
