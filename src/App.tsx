@@ -946,18 +946,49 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     setSpeakingId(null);
   };
 
+  // Clean Markdown before sending text to speech
+  const cleanTextForSpeech = (raw: string) => {
+    return raw
+      .replace(/```[\s\S]*?```/g, ' ')
+      .replace(/~~~[\s\S]*?~~~/g, ' ')
+      .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+      .replace(/^\s*>\s?/gm, '')
+      .replace(/^\s*[-*+]\s+/gm, '')
+      .replace(/^\s*\d+[.)]\s+/gm, '')
+      .replace(/^\s*[-*_]{3,}\s*$/gm, '')
+      .replace(/\*\*\*(.*?)\*\*\*/gs, '$1')
+      .replace(/\*\*(.*?)\*\*/gs, '$1')
+      .replace(/__(.*?)__/gs, '$1')
+      .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, '$1')
+      .replace(/(?<!_)_([^_\n]+)_(?!_)/g, '$1')
+      .replace(/~~(.*?)~~/gs, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/^\s*\|?[\s:|-]+\|?\s*$/gm, '')
+      .replace(/\|/g, ' ')
+      .replace(/[ \t]{2,}/g, ' ')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  };
+
   // Read AI answer aloud
   const speakMessage = async (text: string, id: string) => {
     try {
+      const speechText = cleanTextForSpeech(text);
+      if (!speechText) {
+        setStatusMessage('There is no readable text to speak.');
+        return;
+      }
       setSpeakingId(id);
 
       if (Capacitor.isNativePlatform()) {
         await TextToSpeech.stop();
 
-        const lang = /[\\u0900-\\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+        const lang = /[\\u0900-\\u097F]/.test(speechText) ? 'hi-IN' : 'en-IN';
 
         await TextToSpeech.speak({
-          text,
+          text: speechText,
           lang,
           rate: 1,
           pitch: 1,
@@ -972,8 +1003,8 @@ const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
 
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = /[\\u0900-\\u097F]/.test(text) ? 'hi-IN' : 'en-IN';
+        const utterance = new SpeechSynthesisUtterance(speechText);
+        utterance.lang = /[\\u0900-\\u097F]/.test(speechText) ? 'hi-IN' : 'en-IN';
         utterance.rate = 1;
         utterance.pitch = 1;
         utterance.onend = () => setSpeakingId(null);
